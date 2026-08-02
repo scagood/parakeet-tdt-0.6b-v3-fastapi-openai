@@ -21,6 +21,9 @@ COPY requirements.txt .
 # Keep the API/runtime dependency set identical to the GPU image, replacing
 # only the execution-provider wheel with the Python-3.10-compatible CPU build.
 RUN pip install --no-cache-dir --upgrade pip && \
+    # silero-vad hard-depends on torch; install the CPU-only build first so
+    # pip doesn't pull the multi-GB CUDA torch wheels from PyPI.
+    pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     grep -v '^onnxruntime-gpu' requirements.txt > /tmp/requirements.cpu.txt && \
     pip install --no-cache-dir -r /tmp/requirements.cpu.txt && \
     pip install --no-cache-dir onnxruntime==1.23.2

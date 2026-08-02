@@ -1,7 +1,11 @@
 # Parakeet TDT 0.6B ONNX - GPU Dockerfile
 # High-performance speech transcription with NVIDIA CUDA
 
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+# python:slim instead of nvidia/cuda: the CUDA/cuDNN runtime libraries come
+# from the onnxruntime-gpu[cuda,cudnn] pip wheels (preloaded in model.py), and
+# the driver is injected by the host's nvidia-container-toolkit. The ~2GB CUDA
+# base image duplicated all of that.
+FROM python:3.10-slim
 
 LABEL maintainer="Parakeet TDT"
 LABEL description="ONNX-optimized speech transcription service (GPU/CUDA)"
@@ -9,12 +13,7 @@ LABEL description="ONNX-optimized speech transcription service (GPU/CUDA)"
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3.10-venv \
-    python3-pip \
     ffmpeg \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -27,6 +26,10 @@ WORKDIR /app
 # major-version mismatches.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
+    # silero-vad hard-depends on torch, which it only uses for VAD tensor ops;
+    # install the CPU-only build first so pip doesn't pull the multi-GB CUDA
+    # torch wheels (inference runs through onnxruntime-gpu, not torch).
+    pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
