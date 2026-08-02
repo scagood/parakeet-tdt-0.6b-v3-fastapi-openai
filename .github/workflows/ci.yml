@@ -25,4 +25,4 @@ jobs:
       - name: Compile service
         run: python -m compileall -q parakeet_service server.py
       - name: Run unit tests
-        run: pytest -q
+        run: pytest -q tests
