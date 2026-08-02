@@ -1,7 +1,7 @@
 # Parakeet TDT 0.6B ONNX - CPU Dockerfile
 # High-performance speech transcription on CPU
 
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 LABEL maintainer="Parakeet TDT"
 LABEL description="ONNX-optimized speech transcription service (CPU)"
@@ -19,7 +19,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Keep the API/runtime dependency set identical to the GPU image, replacing
-# only the execution-provider wheel with the Python-3.10-compatible CPU build.
+# only the execution-provider wheel with the CPU build.
 RUN pip install --no-cache-dir --upgrade pip && \
     # silero-vad hard-depends on torch; install the CPU-only build first so
     # pip doesn't pull the multi-GB CUDA torch wheels from PyPI.
