@@ -79,7 +79,7 @@ os.environ.setdefault("HF_HUB_CACHE", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "true")
 
 MODEL_CONFIGS = {
-    "parakeet-v3": {
+    "parakeet-v3-int8": {
         "hf_id": "nemo-parakeet-tdt-0.6b-v3",
         "quantization": "int8",
         "description": "INT8 CPU profile",
@@ -94,7 +94,7 @@ MODEL_CONFIGS = {
         "quantization": "fp16",
         "description": "FP16 GPU profile",
     },
-    "parakeet-v2": {
+    "parakeet-v2-int8": {
         "hf_id": "nemo-parakeet-tdt-0.6b-v2",
         "quantization": "int8",
         "description": "INT8 CPU profile (English-only v2)",
@@ -112,10 +112,12 @@ MODEL_CONFIGS = {
 }
 # Former API names, kept working. Keys are lowercase; lookups are normalized.
 MODEL_ALIASES = {
-    "parakeet-tdt-0.6b-v3": "parakeet-v3",
+    "parakeet-v3": "parakeet-v3-fp32",
+    "parakeet-tdt-0.6b-v3": "parakeet-v3-int8",
     "istupakov/parakeet-tdt-0.6b-v3-onnx": "parakeet-v3-fp32",
     "grikdotnet/parakeet-tdt-0.6b-fp16": "parakeet-v3-fp16",
-    "parakeet-tdt-0.6b-v2": "parakeet-v2",
+    "parakeet-v2": "parakeet-v2-fp32",
+    "parakeet-tdt-0.6b-v2": "parakeet-v2-int8",
     "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
 }
 # FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so

@@ -303,6 +303,7 @@ def _model_card(name: str) -> Dict[str, Any]:
         "owned_by": hf_id.split("/")[0] if "/" in hf_id else "istupakov",
         "language": ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES,
         "task": "automatic-speech-recognition",
+        "aliases": sorted(a for a, t in MODEL_ALIASES.items() if t == name),
     }
 
 

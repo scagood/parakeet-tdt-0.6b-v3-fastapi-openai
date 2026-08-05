@@ -35,6 +35,12 @@ def test_models_endpoint_lists_catalog():
         assert card["language"]
     v2_cards = [c for c in listing["data"] if c["id"].startswith("parakeet-v2")]
     assert all(c["language"] == ["en"] for c in v2_cards)
+    cards_by_id = {c["id"]: c for c in listing["data"]}
+    assert cards_by_id["parakeet-v3-int8"]["aliases"] == ["parakeet-tdt-0.6b-v3"]
+    assert cards_by_id["parakeet-v3-fp32"]["aliases"] == [
+        "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        "parakeet-v3",
+    ]
 
 
 def test_models_endpoint_retrieve_resolves_aliases():
@@ -50,13 +56,13 @@ def test_explicit_default_skips_probe(monkeypatch):
 
     monkeypatch.setattr(m, "_DEFAULT_MODEL_NAME", None)
     monkeypatch.setattr(m, "DEFAULT_MODEL_EXPLICIT", True)
-    monkeypatch.setattr(m, "DEFAULT_MODEL", "parakeet-v2")
+    monkeypatch.setattr(m, "DEFAULT_MODEL", "parakeet-v2-int8")
     monkeypatch.setattr(m, "USE_GPU", "auto")
     monkeypatch.setattr(
         m, "_preload_cuda_libraries",
         lambda: (_ for _ in ()).throw(AssertionError("must not probe")),
     )
-    assert m.default_model_name() == "parakeet-v2"
+    assert m.default_model_name() == "parakeet-v2-int8"
 
 
 def test_auto_default_probes_cuda(monkeypatch):
