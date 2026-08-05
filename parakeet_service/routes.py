@@ -15,7 +15,6 @@ from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
     CPU_INFO,
-    DEFAULT_MODEL,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
     MAX_BATCH_FILES,
@@ -27,7 +26,7 @@ from .config import (
     UPLOAD_READ_CHUNK_BYTES,
     logger,
 )
-from .model import loaded_models
+from .model import default_model_name, loaded_models
 
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
@@ -123,8 +122,8 @@ def _extract(result: Any) -> Dict[str, Any]:
     return {"text": text, "tokens": tokens, "timestamps": timestamps}
 
 
-def _validate_model(model: str) -> str:
-    normalized = (model or DEFAULT_MODEL).strip().lower()
+def _validate_model(model: Optional[str]) -> str:
+    normalized = (model or default_model_name()).strip().lower()
     normalized = MODEL_ALIASES.get(normalized, normalized)
     if normalized not in MODEL_CONFIGS:
         raise HTTPException(
@@ -294,7 +293,7 @@ def health(request: Request):
         "ready": ready,
         "models": list(MODEL_CONFIGS.keys()),
         "loaded": loaded_models(),
-        "default_model": DEFAULT_MODEL,
+        "default_model": default_model_name(),
         "cpu": CPU_INFO,
     }
 
@@ -310,7 +309,7 @@ def healthz(request: Request):
 async def transcribe(
     request: Request,
     file: UploadFile = File(...),
-    model: str = Form(DEFAULT_MODEL),
+    model: Optional[str] = Form(None),
     response_format: str = Form("json"),
     timestamp_granularities: Optional[List[str]] = Form(
         None, alias="timestamp_granularities[]"
@@ -387,7 +386,7 @@ async def transcribe(
 async def transcribe_batch(
     request: Request,
     files: List[UploadFile] = File(...),
-    model: str = Form(DEFAULT_MODEL),
+    model: Optional[str] = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")

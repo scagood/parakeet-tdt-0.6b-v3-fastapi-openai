@@ -118,11 +118,14 @@ MODEL_ALIASES = {
     "parakeet-tdt-0.6b-v2": "parakeet-v2",
     "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
 }
-GPU_DEFAULT_MODEL = "parakeet-v3-fp32"
-CPU_DEFAULT_MODEL = "parakeet-v3"
+# FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so
+# CPU deployments default to FP32. int8 measurably drops words after silences.
+GPU_DEFAULT_MODEL = "parakeet-v3-fp16"
+CPU_DEFAULT_MODEL = "parakeet-v3-fp32"
 
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
 _default_model_fallback = CPU_DEFAULT_MODEL if USE_GPU == "false" else GPU_DEFAULT_MODEL
+DEFAULT_MODEL_EXPLICIT = os.getenv("PARAKEET_DEFAULT_MODEL") is not None
 DEFAULT_MODEL = os.getenv("PARAKEET_DEFAULT_MODEL", _default_model_fallback).strip().lower()
 DEFAULT_MODEL = MODEL_ALIASES.get(DEFAULT_MODEL, DEFAULT_MODEL)
 if DEFAULT_MODEL not in MODEL_CONFIGS:

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .batchworker import build_worker
-from .config import AUDIO_WORKERS, DEFAULT_MODEL, logger
+from .config import AUDIO_WORKERS, logger
 from .model import get_model, load_model
 from .routes import router
 
@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     )
     try:
         logger.info("Lifespan startup: loading default model")
-        await asyncio.to_thread(load_model, DEFAULT_MODEL)
+        await asyncio.to_thread(load_model)
         app.state.worker = build_worker(get_model)
         await app.state.worker.start()
         app.state.ready = True

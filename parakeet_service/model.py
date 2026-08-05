@@ -6,7 +6,10 @@ from typing import Any, Dict, List, Tuple
 
 # Import config before ONNX Runtime so thread-pool environment limits are active.
 from .config import (
+    CPU_DEFAULT_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_MODEL_EXPLICIT,
+    GPU_DEFAULT_MODEL,
     GPU_DEVICE_ID,
     MODEL_ALIASES,
     MODEL_CONFIGS,
@@ -128,8 +131,40 @@ def _validate_gpu_binding(name: str, model: Any) -> None:
         )
 
 
-def load_model(name: str = DEFAULT_MODEL, *, with_timestamps: bool = True):
-    normalized = (name or DEFAULT_MODEL).strip().lower()
+_DEFAULT_MODEL_NAME: str | None = None
+
+
+def default_model_name() -> str:
+    """Return the default model, probing CUDA availability when USE_GPU=auto.
+
+    Resolved once, on first use (i.e. at startup, not import), so the answer
+    reflects whether CUDA libraries actually load on this host.
+    """
+    global _DEFAULT_MODEL_NAME
+    if _DEFAULT_MODEL_NAME is None:
+        if DEFAULT_MODEL_EXPLICIT:
+            name = DEFAULT_MODEL
+        elif USE_GPU == "false":
+            name = CPU_DEFAULT_MODEL
+        elif USE_GPU == "true":
+            name = GPU_DEFAULT_MODEL
+        else:  # auto: pick by what this host can actually run
+            has_cuda = (
+                _preload_cuda_libraries()
+                and "CUDAExecutionProvider" in ort.get_available_providers()
+            )
+            name = GPU_DEFAULT_MODEL if has_cuda else CPU_DEFAULT_MODEL
+            logger.info(
+                "USE_GPU=auto: CUDA %s; default model %s",
+                "available" if has_cuda else "unavailable",
+                name,
+            )
+        _DEFAULT_MODEL_NAME = name
+    return _DEFAULT_MODEL_NAME
+
+
+def load_model(name: str | None = None, *, with_timestamps: bool = True):
+    normalized = (name or default_model_name()).strip().lower()
     normalized = MODEL_ALIASES.get(normalized, normalized)
     if normalized not in MODEL_CONFIGS:
         raise ValueError(f"unknown model {name!r}; choose one of {sorted(MODEL_CONFIGS)}")
@@ -165,7 +200,7 @@ def load_model(name: str = DEFAULT_MODEL, *, with_timestamps: bool = True):
         return model
 
 
-def get_model(name: str = DEFAULT_MODEL):
+def get_model(name: str | None = None):
     return load_model(name, with_timestamps=True)
 
 
