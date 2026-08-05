@@ -47,6 +47,19 @@ def test_long_uninterrupted_speech_has_no_phantom_tail(monkeypatch):
     assert all(end - start > 1 for start, end in ranges)
 
 
+def test_long_silence_gap_is_cut_out_of_chunks(monkeypatch):
+    sr = chunker.TARGET_SR
+    total = int(chunker.CHUNK_MAX_SEC * 2 * sr)
+    speech = [(0, 10 * sr), (40 * sr, total)]  # 30 s silent gap
+    monkeypatch.setattr(chunker, "_silero_speech_segments", lambda _wav: speech)
+    ranges = chunker.auto_chunk(np.ones(total, dtype=np.float32))
+    maximum = int(chunker.CHUNK_MAX_SEC * sr)
+    _assert_valid(ranges, total, maximum)
+    assert ranges[0] == (0, 10 * sr)
+    assert ranges[1][0] == 40 * sr
+    assert not any(start < 40 * sr and end > 10 * sr for start, end in ranges[1:])
+
+
 def test_slice_chunks_returns_views():
     waveform = np.arange(20, dtype=np.float32)
     pieces = chunker.slice_chunks(waveform, [(2, 8), (8, 12)])

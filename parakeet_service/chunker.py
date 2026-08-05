@@ -8,6 +8,7 @@ from .config import (
     CHUNK_MAX_SEC,
     CHUNK_MIN_SEC,
     CHUNK_TARGET_SEC,
+    CHUNK_TRIM_SILENCE_SEC,
     TARGET_SR,
     VAD_MIN_SILENCE_MS,
     VAD_SPEECH_PAD_MS,
@@ -156,9 +157,17 @@ def auto_chunk(wav: np.ndarray) -> List[Range]:
     if not segments:
         return []
 
+    trim_gap = max(1, int(CHUNK_TRIM_SILENCE_SEC * TARGET_SR))
     packed: List[Range] = []
     current_start, current_end = segments[0]
     for start, end in segments[1:]:
+        # Cut at long silences and skip them entirely: feeding multi-second
+        # silence to the model degrades recognition of the following speech,
+        # and VAD already pads each segment, so no speech is lost.
+        if start - current_end >= trim_gap:
+            packed.append((current_start, current_end))
+            current_start, current_end = start, end
+            continue
         if end - current_start <= target:
             current_end = end
             continue

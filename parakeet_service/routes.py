@@ -31,6 +31,11 @@ from .model import loaded_models
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
 
+# Parakeet TDT reports token START times only (80 ms encoder frames); its
+# duration head emits at most 4 frames per token, so a token's audio never
+# extends more than 0.32 s past its start.
+_WORD_TAIL_SEC = 0.32
+
 
 @dataclass(slots=True)
 class _PreparedAudio:
@@ -94,14 +99,26 @@ def _segments_to_vtt(segments: Sequence[Dict[str, Any]]) -> str:
 def _extract(result: Any) -> Dict[str, Any]:
     text = _clean_text(getattr(result, "text", str(result)))
     tokens = [str(token) for token in (getattr(result, "tokens", []) or [])]
+    raw_timestamps = list(getattr(result, "timestamps", []) or [])
+    if tokens and len(raw_timestamps) != len(tokens):
+        logger.warning(
+            "token/timestamp length mismatch: %d tokens vs %d timestamps",
+            len(tokens),
+            len(raw_timestamps),
+        )
+    # Substitute the previous timestamp for missing/invalid entries instead of
+    # dropping them, so tokens and timestamps always stay aligned 1:1.
     timestamps: List[float] = []
-    for value in list(getattr(result, "timestamps", []) or []):
+    previous = 0.0
+    for index in range(len(tokens)):
         try:
-            timestamp = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(timestamp):
-            timestamps.append(max(0.0, timestamp))
+            timestamp = float(raw_timestamps[index])
+        except (IndexError, TypeError, ValueError):
+            timestamp = previous
+        if not math.isfinite(timestamp) or timestamp < 0.0:
+            timestamp = previous
+        timestamps.append(timestamp)
+        previous = timestamp
     return {"text": text, "tokens": tokens, "timestamps": timestamps}
 
 
@@ -216,6 +233,10 @@ def _stitch(
         if timestamps:
             segment_start = min(chunk_end, max(chunk_start, chunk_start + timestamps[0]))
         segment_end = max(segment_start, chunk_end)
+        if timestamps:
+            segment_end = min(
+                segment_end, max(segment_start, chunk_start + timestamps[-1] + _WORD_TAIL_SEC)
+            )
         segments.append(
             {
                 "start": segment_start,
@@ -224,15 +245,31 @@ def _stitch(
             }
         )
 
-        for index, (token, timestamp) in enumerate(zip(info["tokens"], timestamps)):
-            word = token.replace("\u2581", " ").strip()
-            if not word:
+        # Group BPE pieces into words: a piece starting with the word marker
+        # ("\u2581" or a plain space, depending on export) opens a new word.
+        grouped: List[Tuple[str, float, float]] = []  # (word, first_ts, last_ts)
+        for token, timestamp in zip(info["tokens"], timestamps):
+            piece = token.replace("\u2581", " ")
+            starts_word = piece.startswith(" ")
+            piece = piece.strip()
+            if not piece:
                 continue
-            word_start = min(chunk_end, max(chunk_start, chunk_start + timestamp))
-            if index + 1 < len(timestamps):
-                word_end = chunk_start + timestamps[index + 1]
+            if grouped and not starts_word:
+                word, first_ts, _last_ts = grouped[-1]
+                grouped[-1] = (word + piece, first_ts, timestamp)
             else:
-                word_end = segment_end
+                grouped.append((piece, timestamp, timestamp))
+
+        for index, (word, first_ts, last_ts) in enumerate(grouped):
+            word_start = min(chunk_end, max(chunk_start, chunk_start + first_ts))
+            if index + 1 < len(grouped):
+                next_start = chunk_start + grouped[index + 1][1]
+            else:
+                next_start = chunk_end
+            # The model only reports token start times, so bound the end by the
+            # last token's start plus the model's maximum token duration rather
+            # than letting a word absorb the silence before the next word.
+            word_end = min(next_start, chunk_start + last_ts + _WORD_TAIL_SEC)
             word_end = min(chunk_end, max(word_start, word_end))
             words.append({"start": word_start, "end": word_end, "word": word})
 

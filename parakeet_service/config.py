@@ -122,6 +122,11 @@ if not CHUNK_MIN_SEC <= CHUNK_TARGET_SEC <= CHUNK_MAX_SEC:
         "PARAKEET_CHUNK_TARGET_SEC <= PARAKEET_CHUNK_MAX_SEC"
     )
 
+# Silence gaps at least this long are cut out of chunks instead of being fed
+# to the model; long in-chunk silence measurably degrades recognition of the
+# speech that follows it (int8 TDT drops words after multi-second pauses).
+CHUNK_TRIM_SILENCE_SEC = _env_float("PARAKEET_CHUNK_TRIM_SILENCE_SEC", 3.0, minimum=0.5)
+
 VAD_THRESHOLD = _env_float("PARAKEET_VAD_THRESHOLD", 0.5, minimum=0.0)
 if VAD_THRESHOLD > 1.0:
     raise RuntimeError("PARAKEET_VAD_THRESHOLD must be <= 1.0")
