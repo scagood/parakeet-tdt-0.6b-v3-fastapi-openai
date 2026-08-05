@@ -1,0 +1,26 @@
+on:
+  push:
+    branches:
+      - main
+
+name: release-please
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Generate a token
+        id: generate_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.TEA_POT_ID }}
+          private-key: ${{ secrets.TEA_POT_KEY }}
+
+      - id: release
+        uses: GoogleCloudPlatform/release-please-action@v5.0.0
+        with:
+          token: ${{ steps.generate_token.outputs.token }}
+          config-file: .github/release-please/config.json
+          manifest-file: .github/release-please/manifest.json

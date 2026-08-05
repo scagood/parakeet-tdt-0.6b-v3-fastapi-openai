@@ -1,0 +1,33 @@
+{
+  "release-type": "simple",
+  "commit-search-depth": 100,
+  "release-search-depth": 100,
+  "separate-pull-requests": true,
+  "include-component-in-tag": false,
+  "changelog-sections": [
+    { "type": "feat", "section": "🌟 Features", "hidden": false },
+    { "type": "fix", "section": "🩹 Fixes", "hidden": false },
+    { "type": "docs", "section": "📚 Documentation", "hidden": false },
+    { "type": "perf", "section": "⚡ Performance", "hidden": false },
+
+    { "type": "deps", "scope": "dev", "hidden": true },
+    { "type": "deps", "scope": "deps", "hidden": true },
+    { "type": "deps", "scope": "lock", "hidden": true },
+    { "type": "deps", "scope": "pkg", "section": "📦 Dependencies", "hidden": false },
+
+    { "type": "refactor", "section": "🔨 Code Refactoring", "hidden": true },
+    { "type": "test", "section": "🧪 Tests", "hidden": true },
+    { "type": "chore", "section": "🧹 Chores", "hidden": false },
+
+    { "type": "revert", "section": "⏪ Reverts", "hidden": false },
+    { "type": "build", "section": "🤖 Automation", "hidden": false },
+    { "type": "ci", "section": "🤖 Automation", "hidden": false }
+  ],
+  "packages": {
+    ".": {
+      "extra-files": [
+        { "type": "generic", "path": "parakeet_service/main.py" }
+      ]
+    }
+  }
+}
