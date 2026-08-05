@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.3.0...v1.4.0) (2026-08-05)
+
+
+### 🌟 Features
+
+* **service:** explicit -int8 model ids and aliases in /v1/models ([4360ba9](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/4360ba94f5abbd88bfc525c7e6ed12d727f98725))
+
+
+### 🩹 Fixes
+
+* **docker:** drop stale PARAKEET_DEFAULT_MODEL pins ([d1aa26f](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/d1aa26fc439abbad9ee0cae1959a5ac1ed8a68c2))
+
 ## [1.3.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.2.0...v1.3.0) (2026-08-05)
 
 
