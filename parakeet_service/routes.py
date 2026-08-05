@@ -285,6 +285,43 @@ async def _infer_prepared(request: Request, prepared: _PreparedAudio, model_name
     return await worker.submit_many(prepared.pieces, model_name)
 
 
+# parakeet-tdt-0.6b-v3 language coverage; v2 is English-only.
+_V3_LANGUAGES = [
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
+    "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
+    "uk",
+]
+_MODEL_CREATED = 1785888000  # catalog introduction (2026-08-05), fixed for stable output
+
+
+def _model_card(name: str) -> Dict[str, Any]:
+    hf_id = MODEL_CONFIGS[name]["hf_id"]
+    return {
+        "id": name,
+        "object": "model",
+        "created": _MODEL_CREATED,
+        "owned_by": hf_id.split("/")[0] if "/" in hf_id else "istupakov",
+        "language": ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES,
+        "task": "automatic-speech-recognition",
+    }
+
+
+@router.get("/v1/models")
+def list_models():
+    return {"object": "list", "data": [_model_card(name) for name in MODEL_CONFIGS]}
+
+
+@router.get("/v1/models/{model_id:path}")
+def retrieve_model(model_id: str):
+    try:
+        name = _validate_model(model_id)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Model {model_id!r} not found"
+        ) from exc
+    return _model_card(name)
+
+
 @router.get("/health")
 def health(request: Request):
     ready = bool(getattr(request.app.state, "ready", False))

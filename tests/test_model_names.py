@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
+from parakeet_service import routes
 from parakeet_service.config import MODEL_ALIASES, MODEL_CONFIGS
 from parakeet_service.routes import _validate_model
 
@@ -22,6 +23,26 @@ def test_old_names_still_work():
 def test_unknown_model_rejected():
     with pytest.raises(HTTPException):
         _validate_model("parakeet-v99")
+
+
+def test_models_endpoint_lists_catalog():
+    listing = routes.list_models()
+    assert listing["object"] == "list"
+    assert [card["id"] for card in listing["data"]] == list(MODEL_CONFIGS)
+    for card in listing["data"]:
+        assert card["object"] == "model"
+        assert card["task"] == "automatic-speech-recognition"
+        assert card["language"]
+    v2_cards = [c for c in listing["data"] if c["id"].startswith("parakeet-v2")]
+    assert all(c["language"] == ["en"] for c in v2_cards)
+
+
+def test_models_endpoint_retrieve_resolves_aliases():
+    card = routes.retrieve_model("istupakov/parakeet-tdt-0.6b-v3-onnx")
+    assert card["id"] == "parakeet-v3-fp32"
+    with pytest.raises(HTTPException) as err:
+        routes.retrieve_model("parakeet-v99")
+    assert err.value.status_code == 404
 
 
 def test_explicit_default_skips_probe(monkeypatch):
