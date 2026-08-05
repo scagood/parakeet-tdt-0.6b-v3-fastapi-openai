@@ -1,7 +1,10 @@
 """In-memory audio decoding and resampling."""
 from __future__ import annotations
 
-import audioop
+try:
+    import audioop  # removed from the stdlib in Python 3.13 (PEP 594)
+except ImportError:
+    audioop = None  # type: ignore[assignment]
 import subprocess
 import wave
 from io import BytesIO
@@ -36,6 +39,11 @@ def _decode_pcm_wav(data: bytes, info: dict) -> Optional[np.ndarray]:
     channels = info["channels"]
     if sample_width not in (1, 2, 3, 4) or channels not in (1, 2):
         return None
+    needs_audioop = (
+        channels == 2 or info["sample_rate"] != TARGET_SR or sample_width == 3
+    )
+    if audioop is None and needs_audioop:
+        return None  # the ffmpeg fallback handles conversion
     try:
         with wave.open(BytesIO(data), "rb") as wav_file:
             pcm = wav_file.readframes(wav_file.getnframes())
@@ -65,7 +73,9 @@ def _decode_pcm_wav(data: bytes, info: dict) -> Optional[np.ndarray]:
             pcm16 = audioop.lin2lin(pcm, sample_width, 2)
             result = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         return np.ascontiguousarray(result, dtype=np.float32)
-    except (wave.Error, EOFError, OSError, audioop.error, ValueError):
+    except (wave.Error, EOFError, OSError, ValueError) + (
+        (audioop.error,) if audioop is not None else ()
+    ):
         return None
 
 
