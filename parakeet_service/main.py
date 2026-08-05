@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Parakeet TDT 0.6B v3 (optimized)",
-        version="1.3.0",  # x-release-please-version
+        version="1.4.0",  # x-release-please-version
         description=(
             "High-throughput OpenAI-compatible ASR service for "
             "Parakeet TDT 0.6B v3."
