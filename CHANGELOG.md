@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.2.0...v1.3.0) (2026-08-05)
+
+
+### 🌟 Features
+
+* **service:** OpenAI-compatible /v1/models endpoints ([d609b35](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/d609b350b5ee199b2b85ed09ce36a2f55b2adb17))
+
 ## [1.2.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.1.0...v1.2.0) (2026-08-05)
 
 
