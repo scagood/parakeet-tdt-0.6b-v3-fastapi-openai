@@ -79,28 +79,52 @@ os.environ.setdefault("HF_HUB_CACHE", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "true")
 
 MODEL_CONFIGS = {
-    "parakeet-tdt-0.6b-v3": {
+    "parakeet-v3": {
         "hf_id": "nemo-parakeet-tdt-0.6b-v3",
         "quantization": "int8",
         "description": "INT8 CPU profile",
     },
-    "istupakov/parakeet-tdt-0.6b-v3-onnx": {
+    "parakeet-v3-fp32": {
         "hf_id": "istupakov/parakeet-tdt-0.6b-v3-onnx",
         "quantization": None,
         "description": "FP32 GPU profile",
     },
-    "grikdotnet/parakeet-tdt-0.6b-fp16": {
+    "parakeet-v3-fp16": {
         "hf_id": "grikdotnet/parakeet-tdt-0.6b-fp16",
         "quantization": "fp16",
         "description": "FP16 GPU profile",
     },
+    "parakeet-v2": {
+        "hf_id": "nemo-parakeet-tdt-0.6b-v2",
+        "quantization": "int8",
+        "description": "INT8 CPU profile (English-only v2)",
+    },
+    "parakeet-v2-fp32": {
+        "hf_id": "istupakov/parakeet-tdt-0.6b-v2-onnx",
+        "quantization": None,
+        "description": "FP32 profile (English-only v2)",
+    },
+    "parakeet-v2-fp16": {
+        "hf_id": "ysdede/parakeet-tdt-0.6b-v2-onnx",
+        "quantization": "fp16",
+        "description": "FP16 GPU profile (English-only v2)",
+    },
 }
-GPU_DEFAULT_MODEL = "istupakov/parakeet-tdt-0.6b-v3-onnx"
-CPU_DEFAULT_MODEL = "parakeet-tdt-0.6b-v3"
+# Former API names, kept working. Keys are lowercase; lookups are normalized.
+MODEL_ALIASES = {
+    "parakeet-tdt-0.6b-v3": "parakeet-v3",
+    "istupakov/parakeet-tdt-0.6b-v3-onnx": "parakeet-v3-fp32",
+    "grikdotnet/parakeet-tdt-0.6b-fp16": "parakeet-v3-fp16",
+    "parakeet-tdt-0.6b-v2": "parakeet-v2",
+    "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
+}
+GPU_DEFAULT_MODEL = "parakeet-v3-fp32"
+CPU_DEFAULT_MODEL = "parakeet-v3"
 
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
 _default_model_fallback = CPU_DEFAULT_MODEL if USE_GPU == "false" else GPU_DEFAULT_MODEL
 DEFAULT_MODEL = os.getenv("PARAKEET_DEFAULT_MODEL", _default_model_fallback).strip().lower()
+DEFAULT_MODEL = MODEL_ALIASES.get(DEFAULT_MODEL, DEFAULT_MODEL)
 if DEFAULT_MODEL not in MODEL_CONFIGS:
     raise RuntimeError(
         "PARAKEET_DEFAULT_MODEL must be one of "

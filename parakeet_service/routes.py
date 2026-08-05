@@ -21,6 +21,7 @@ from .config import (
     MAX_BATCH_FILES,
     MAX_REQUEST_CHUNKS,
     MAX_UPLOAD_BYTES,
+    MODEL_ALIASES,
     MODEL_CONFIGS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
@@ -124,6 +125,7 @@ def _extract(result: Any) -> Dict[str, Any]:
 
 def _validate_model(model: str) -> str:
     normalized = (model or DEFAULT_MODEL).strip().lower()
+    normalized = MODEL_ALIASES.get(normalized, normalized)
     if normalized not in MODEL_CONFIGS:
         raise HTTPException(
             status_code=400,

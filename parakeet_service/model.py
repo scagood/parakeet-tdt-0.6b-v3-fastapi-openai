@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 from .config import (
     DEFAULT_MODEL,
     GPU_DEVICE_ID,
+    MODEL_ALIASES,
     MODEL_CONFIGS,
     ORT_INTER_THREADS,
     ORT_INTRA_THREADS,
@@ -129,6 +130,7 @@ def _validate_gpu_binding(name: str, model: Any) -> None:
 
 def load_model(name: str = DEFAULT_MODEL, *, with_timestamps: bool = True):
     normalized = (name or DEFAULT_MODEL).strip().lower()
+    normalized = MODEL_ALIASES.get(normalized, normalized)
     if normalized not in MODEL_CONFIGS:
         raise ValueError(f"unknown model {name!r}; choose one of {sorted(MODEL_CONFIGS)}")
     key = (normalized, with_timestamps)
