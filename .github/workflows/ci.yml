@@ -23,7 +23,8 @@ jobs:
       - name: Install lightweight test dependencies
         # numpy unpinned here (requirements.txt pins <2 for the runtime):
         # numpy 1.26 has no wheels for 3.13+, and the unit tests pass on both.
-        run: python -m pip install --upgrade pip numpy pytest pytest-asyncio psutil
+        # fastapi + python-multipart: tests import parakeet_service.routes.
+        run: python -m pip install --upgrade pip numpy pytest pytest-asyncio psutil fastapi python-multipart
       - name: Compile service
         run: python -m compileall -q parakeet_service server.py
       - name: Run unit tests
