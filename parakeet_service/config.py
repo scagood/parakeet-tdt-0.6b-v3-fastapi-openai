@@ -6,10 +6,11 @@ large model is downloaded or loaded into memory.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 # Set numeric-library limits before importing NumPy/ONNX Runtime in other modules.
@@ -77,6 +78,16 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_CACHE", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "true")
+
+# Even with a fully warm cache, huggingface_hub makes a revision-check request
+# to huggingface.co on every load. Offline mode skips it and reads the cache
+# directly, which matters when many replicas start at once behind a
+# rate-limited or firewalled egress. Only enable it where the cache is
+# pre-seeded out of band; an incomplete cache fails the load instead of
+# downloading the remainder.
+HF_OFFLINE = _env_bool("PARAKEET_HF_OFFLINE", False)
+if HF_OFFLINE:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 MODEL_CONFIGS = {
     "parakeet-v3-int8": {
@@ -168,6 +179,14 @@ MAX_BATCH_SIZE = _env_int("PARAKEET_MAX_BATCH_SIZE", 4)
 BATCH_WINDOW_MS = _env_float("PARAKEET_BATCH_WINDOW_MS", 4.0, minimum=0.0)
 INFER_WORKERS = _env_int("PARAKEET_INFER_WORKERS", 4)
 
+# ONNX Runtime defers kernel selection and arena allocation to the first
+# inference, so a freshly started replica serves its first real request well
+# below steady-state speed. Pushing one synthetic chunk through before
+# reporting ready moves that cost into startup, where an orchestrator is
+# already waiting on the readiness probe.
+WARMUP = _env_bool("PARAKEET_WARMUP", True)
+WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
+
 MAX_UPLOAD_BYTES = _env_int(
     "PARAKEET_MAX_UPLOAD_BYTES", 256 * 1024 * 1024, minimum=1
 )
@@ -184,17 +203,72 @@ UPLOAD_READ_CHUNK_BYTES = min(1024 * 1024, MAX_UPLOAD_BYTES)
 # ---------------------------------------------------------------------------
 # CPU/ORT threading
 # ---------------------------------------------------------------------------
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def _read_cgroup_file(path: Path) -> Optional[str]:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def _quota_to_cpus(quota_raw: str, period_raw: str) -> Optional[int]:
+    try:
+        quota = int(quota_raw)
+        period = int(period_raw)
+    except ValueError:
+        return None
+    if quota <= 0 or period <= 0:  # -1 (v1) and 0 both mean "no limit"
+        return None
+    # Round up: a 3.5-core budget still runs 4 threads without oversubscribing,
+    # since they timeshare within the same quota.
+    return max(1, math.ceil(quota / period))
+
+
+def cgroup_cpu_limit(root: Path = CGROUP_ROOT) -> Optional[int]:
+    """Return the CPU count this cgroup's CFS quota allows, else ``None``.
+
+    A Kubernetes ``resources.limits.cpu`` is a CFS *quota*, not a cpuset, so
+    both ``os.sched_getaffinity()`` and ``psutil.cpu_count()`` report the
+    node's full core count from inside a limited pod. Sizing thread pools from
+    those numbers oversubscribes the quota badly — a 4-core pod on a 64-core
+    node would otherwise start 64 ORT intra-op threads and thrash.
+    """
+    # cgroup v2: a single "<quota> <period>" line; quota is "max" when unset.
+    v2 = _read_cgroup_file(root / "cpu.max")
+    if v2:
+        parts = v2.split()
+        if len(parts) == 2:
+            return None if parts[0] == "max" else _quota_to_cpus(parts[0], parts[1])
+
+    # cgroup v1: separate quota/period files, quota of -1 when unset.
+    quota = _read_cgroup_file(root / "cpu" / "cpu.cfs_quota_us")
+    period = _read_cgroup_file(root / "cpu" / "cpu.cfs_period_us")
+    if quota is not None and period is not None:
+        return _quota_to_cpus(quota, period)
+    return None
+
+
 try:
-    _available_logical = len(os.sched_getaffinity(0))
+    _detected_logical = len(os.sched_getaffinity(0))
 except (AttributeError, OSError):
-    _available_logical = os.cpu_count() or 1
+    _detected_logical = os.cpu_count() or 1
 
 try:
     import psutil  # type: ignore
 
-    _physical = psutil.cpu_count(logical=False) or _available_logical
+    _detected_physical = psutil.cpu_count(logical=False) or _detected_logical
 except Exception:
-    _physical = _available_logical
+    _detected_physical = _detected_logical
+
+CPU_QUOTA = cgroup_cpu_limit()
+if CPU_QUOTA is None:
+    _available_logical = _detected_logical
+    _physical = _detected_physical
+else:
+    _available_logical = min(_detected_logical, CPU_QUOTA)
+    _physical = min(_detected_physical, _available_logical)
 
 DEFAULT_INTRA = 1 if USE_GPU != "false" else min(_physical, _available_logical)
 ORT_INTRA_THREADS = _env_int("PARAKEET_ORT_INTRA_THREADS", DEFAULT_INTRA)
@@ -216,7 +290,18 @@ logger = logging.getLogger("parakeet_v3")
 CPU_INFO = {
     "physical": _physical,
     "logical": _available_logical,
+    "detected_physical": _detected_physical,
+    "detected_logical": _detected_logical,
+    "cgroup_quota": CPU_QUOTA,
     "ort_intra": ORT_INTRA_THREADS,
     "ort_inter": ORT_INTER_THREADS,
     "audio_workers": AUDIO_WORKERS,
 }
+
+if CPU_QUOTA is not None and CPU_QUOTA < _detected_logical:
+    logger.info(
+        "cgroup CPU quota %d is below the %d detected logical CPUs; "
+        "sizing thread pools from the quota",
+        CPU_QUOTA,
+        _detected_logical,
+    )

@@ -144,9 +144,16 @@ ONNX Runtime's CPU execution provider automatically dispatches AVX2/FMA kernels 
 
 For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pinning the process to Performance cores (P-cores). You can also override the auto-tuned defaults:
 
-* `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask. Minimum: `1`.
+* `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
 * `PARAKEET_ORT_INTER_THREADS`: ONNX Runtime inter-op threads. Defaults to `1`, which is best for single-model inference. Minimum: `1`.
 * `PARAKEET_WAITRESS_THREADS`: HTTP worker threads. Defaults to a conservative value to avoid oversubscribing ONNX Runtime's AVX2 worker pool. Minimum: `1`.
+
+### Running under an orchestrator
+
+Two defaults matter when replicas start and stop frequently:
+
+* **CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is invisible to `sched_getaffinity()` and `psutil`, which keep reporting the node's full core count. Thread pools are now sized from the cgroup quota when one is present, so a 4-core pod no longer starts dozens of ORT threads. `/health` reports `cgroup_quota` next to the detected core counts so you can confirm what was applied.
+* **Cold start.** `PARAKEET_WARMUP` (on by default) pushes one synthetic chunk through the model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
 
 ## Installation
 

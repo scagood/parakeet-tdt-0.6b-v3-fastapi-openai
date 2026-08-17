@@ -175,6 +175,22 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |
 | `PARAKEET_ORT_INTER_THREADS` | `1`        | ORT inter-op threads                                     |
 | `PARAKEET_AUDIO_WORKERS`   | `min(8, physical)` | audio decode/chunk worker pool                     |
+| `PARAKEET_HF_OFFLINE`      | `false`      | skip the Hugging Face revision check; needs a pre-seeded cache |
+| `PARAKEET_WARMUP`          | `true`       | run one synthetic inference before reporting ready       |
+| `PARAKEET_WARMUP_SEC`      | `5`          | warm-up audio length; `0` disables                       |
+
+### Container CPU limits
+
+Thread pools are sized from the cgroup CPU quota when one is set, falling back
+to the affinity mask and physical core count otherwise. This matters under an
+orchestrator: a Kubernetes `resources.limits.cpu` is a CFS *quota*, not a
+cpuset, so `sched_getaffinity()` and `psutil` both report the node's full core
+count from inside a limited container. Without the quota check, a 4-core pod on
+a 64-core node starts 64 ORT intra-op threads and thrashes.
+
+`/health` reports what was detected — `cgroup_quota` alongside the raw
+`detected_physical` / `detected_logical` — so a mis-sized pool is visible
+rather than silent. Set `PARAKEET_ORT_INTRA_THREADS` explicitly to override.
 
 ## Running
 

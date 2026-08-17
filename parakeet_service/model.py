@@ -15,10 +15,13 @@ from .config import (
     MODEL_CONFIGS,
     ORT_INTER_THREADS,
     ORT_INTRA_THREADS,
+    TARGET_SR,
     USE_GPU,
+    WARMUP_SEC,
     logger,
 )
 
+import numpy as np
 import onnx_asr
 import onnxruntime as ort
 
@@ -202,6 +205,23 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
 
 def get_model(name: str | None = None):
     return load_model(name, with_timestamps=True)
+
+
+def warmup_waveform(seconds: float | None = None) -> np.ndarray:
+    """Build the synthetic 16 kHz waveform used for the startup warm-up pass.
+
+    Deterministic on purpose: warm-up cost should not vary run to run. The
+    tones sit in the speech band so the encoder, decoder and joint networks
+    all get exercised, while the low amplitude keeps the decoder from emitting
+    much text.
+    """
+    duration = WARMUP_SEC if seconds is None else seconds
+    samples = max(1, int(duration * TARGET_SR))
+    time_axis = np.arange(samples, dtype=np.float32) / TARGET_SR
+    tones = sum(
+        np.sin(2.0 * np.pi * frequency * time_axis) for frequency in (110.0, 220.0, 440.0)
+    )
+    return (0.05 * tones).astype(np.float32)
 
 
 def loaded_models() -> List[str]:
