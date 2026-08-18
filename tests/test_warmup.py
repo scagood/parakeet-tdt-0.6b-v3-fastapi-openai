@@ -78,3 +78,90 @@ async def test_warmup_gives_up_on_a_stuck_worker(monkeypatch):
     await main._warmup(_app_with_worker(submit))
 
     assert started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_warms_up_before_reporting_ready(monkeypatch):
+    """The point of the warm-up is that it lands *before* readiness.
+
+    Exercises the real lifespan wiring — load, worker start, warm-up, ready —
+    with a stub standing in for the ONNX model, since the model itself is not
+    available in unit-test environments.
+    """
+    from fastapi import FastAPI
+
+    ready_during_warmup = []
+    app = FastAPI()
+
+    class _StubModel:
+        def recognize(self, wav):
+            ready_during_warmup.append(bool(getattr(app.state, "ready", False)))
+            assert getattr(wav, "size", 0) > 0
+            return types.SimpleNamespace(text="", tokens=[], timestamps=[])
+
+    stub = _StubModel()
+    monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+
+    async with main.lifespan(app):
+        assert app.state.ready is True
+        # Exactly one warm-up pass, and readiness was still False during it.
+        assert ready_during_warmup == [False]
+
+    assert app.state.ready is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_reports_ready_when_warmup_is_disabled(monkeypatch):
+    from fastapi import FastAPI
+
+    recognized = []
+    app = FastAPI()
+
+    class _StubModel:
+        def recognize(self, wav):
+            recognized.append(wav)
+            return types.SimpleNamespace(text="", tokens=[], timestamps=[])
+
+    stub = _StubModel()
+    monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "WARMUP", False)
+
+    async with main.lifespan(app):
+        assert app.state.ready is True
+        assert recognized == []
+
+
+@pytest.mark.asyncio
+async def test_lifespan_still_reports_ready_when_warmup_fails(monkeypatch):
+    from fastapi import FastAPI
+
+    app = FastAPI()
+
+    class _BrokenModel:
+        def recognize(self, _wav):
+            raise RuntimeError("kernel selection failed")
+
+    stub = _BrokenModel()
+    monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+
+    async with main.lifespan(app):
+        assert app.state.ready is True
+
+
+def test_warmup_input_matches_a_real_chunk():
+    """Closest available proxy for "the model will accept this".
+
+    The real model is not importable in unit-test environments, so instead
+    assert the warm-up input is indistinguishable from what `slice_chunks`
+    hands the worker on a normal request.
+    """
+    from parakeet_service.chunker import slice_chunks
+
+    real = slice_chunks(np.zeros(TARGET_SR * 30, dtype=np.float32), [(0, TARGET_SR * 30)])[0]
+    warm = warmup_waveform(5.0)
+
+    assert (warm.dtype, warm.ndim) == (real.dtype, real.ndim)
+    assert warm.flags.c_contiguous == real.flags.c_contiguous

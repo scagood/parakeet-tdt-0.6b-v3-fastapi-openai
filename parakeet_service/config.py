@@ -262,13 +262,21 @@ try:
 except Exception:
     _detected_physical = _detected_logical
 
+def effective_cpu_counts(
+    detected_physical: int, detected_logical: int, quota: Optional[int]
+) -> tuple[int, int]:
+    """Clamp detected CPU counts to the cgroup quota, when one applies."""
+    if quota is None:
+        return detected_physical, detected_logical
+    logical = max(1, min(detected_logical, quota))
+    physical = max(1, min(detected_physical, logical))
+    return physical, logical
+
+
 CPU_QUOTA = cgroup_cpu_limit()
-if CPU_QUOTA is None:
-    _available_logical = _detected_logical
-    _physical = _detected_physical
-else:
-    _available_logical = min(_detected_logical, CPU_QUOTA)
-    _physical = min(_detected_physical, _available_logical)
+_physical, _available_logical = effective_cpu_counts(
+    _detected_physical, _detected_logical, CPU_QUOTA
+)
 
 DEFAULT_INTRA = 1 if USE_GPU != "false" else min(_physical, _available_logical)
 ORT_INTRA_THREADS = _env_int("PARAKEET_ORT_INTRA_THREADS", DEFAULT_INTRA)
