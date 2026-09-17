@@ -70,8 +70,12 @@ async def test_warmup_propagates_inference_errors():
 
 
 @pytest.mark.asyncio
-async def test_warmup_fails_on_a_stuck_worker(monkeypatch):
+async def test_warmup_exits_the_process_on_a_stuck_worker(monkeypatch):
+    """A wedged native call cannot be joined, so the timeout path must not
+    fall through to an orderly shutdown that would hang on it."""
     monkeypatch.setattr(main, "WARMUP_TIMEOUT_SEC", 0.01)
+    exits = []
+    monkeypatch.setattr(main, "_exit_without_join", exits.append)
     started = asyncio.Event()
 
     async def submit(_wav, _model_name):
@@ -82,6 +86,7 @@ async def test_warmup_fails_on_a_stuck_worker(monkeypatch):
         await main._warmup(_app_with_worker(submit))
 
     assert started.is_set()
+    assert len(exits) == 1 and "PARAKEET_WARMUP_TIMEOUT_SEC" in exits[0]
 
 
 @pytest.mark.asyncio

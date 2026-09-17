@@ -87,7 +87,9 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "true")
 # downloading the remainder.
 HF_OFFLINE = _env_bool("PARAKEET_HF_OFFLINE", False)
 if HF_OFFLINE:
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    # Assign, not setdefault: an explicit operator request must win over a
+    # base image that exports HF_HUB_OFFLINE=0.
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
 MODEL_CONFIGS = {
     "parakeet-v3-int8": {
@@ -230,13 +232,19 @@ def _quota_to_cpus(quota_raw: str, period_raw: str) -> Optional[int]:
     return max(1, math.ceil(quota / period))
 
 
-def _own_cgroup_paths(proc_cgroup: Path) -> tuple[Optional[str], Optional[str]]:
-    """Return this process's (v2, v1 cpu) cgroup paths from ``/proc/self/cgroup``.
+def _own_cgroup_paths(
+    proc_cgroup: Path,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return this process's (v2 path, v1 cpu path, v1 cpu controllers).
 
-    Each line is ``<id>:<controllers>:<path>``; the v2 (unified) entry has an
-    empty controller list. Either path is ``None`` when its hierarchy is absent.
+    Parsed from ``/proc/self/cgroup``, where each line is
+    ``<id>:<controllers>:<path>``; the v2 (unified) entry has an empty
+    controller list. Entries are ``None`` when their hierarchy is absent. The
+    v1 controller string is returned verbatim because it doubles as the mount
+    directory name when the cpu controller is co-mounted (``cpu,cpuacct`` on
+    most hosts, ``cpuacct,cpu`` on some).
     """
-    v2_path = v1_path = None
+    v2_path = v1_path = v1_controllers = None
     text = _read_cgroup_file(proc_cgroup)
     for line in (text or "").splitlines():
         parts = line.split(":", 2)
@@ -246,8 +254,8 @@ def _own_cgroup_paths(proc_cgroup: Path) -> tuple[Optional[str], Optional[str]]:
         if controllers == "":
             v2_path = path
         elif "cpu" in controllers.split(","):
-            v1_path = path
-    return v2_path, v1_path
+            v1_path, v1_controllers = path, controllers
+    return v2_path, v1_path, v1_controllers
 
 
 def _cgroup_and_ancestors(path: Optional[str]) -> list[Path]:
@@ -274,7 +282,7 @@ def cgroup_cpu_limit(
     nested several levels down and the mount root reports no limit at all.
     Nested quotas compose as a minimum, so the tightest one wins.
     """
-    v2_path, v1_path = _own_cgroup_paths(proc_cgroup)
+    v2_path, v1_path, v1_controllers = _own_cgroup_paths(proc_cgroup)
     limits: list[int] = []
 
     # cgroup v2: a single "<quota> <period>" line; quota is "max" when unset.
@@ -293,9 +301,10 @@ def cgroup_cpu_limit(
         return min(limits) if limits else None
 
     # cgroup v1: separate quota/period files, quota of -1 when unset. The cpu
-    # controller is mounted as "cpu" or co-mounted as "cpu,cpuacct".
+    # controller is mounted under its own name or a co-mounted one.
+    controller_dirs = dict.fromkeys(filter(None, (v1_controllers, "cpu", "cpu,cpuacct")))
     for relative in _cgroup_and_ancestors(v1_path):
-        for controller_dir in ("cpu", "cpu,cpuacct"):
+        for controller_dir in controller_dirs:
             cpu_dir = root / controller_dir / relative
             quota = _read_cgroup_file(cpu_dir / "cpu.cfs_quota_us")
             period = _read_cgroup_file(cpu_dir / "cpu.cfs_period_us")
@@ -341,9 +350,13 @@ ORT_INTRA_THREADS = _env_int("PARAKEET_ORT_INTRA_THREADS", DEFAULT_INTRA)
 ORT_INTER_THREADS = _env_int("PARAKEET_ORT_INTER_THREADS", 1)
 AUDIO_WORKERS = _env_int("PARAKEET_AUDIO_WORKERS", min(8, _physical))
 # Each InferencePool worker runs its own ORT call with ORT_INTRA_THREADS
-# threads, so the pool must not outnumber the CPUs the quota actually grants:
-# a 1-core pod running four concurrent sessions just timeshares one core.
-INFER_WORKERS = _env_int("PARAKEET_INFER_WORKERS", max(1, min(4, _available_logical)))
+# spinning threads, so workers x intra-op threads is what has to fit the CPUs
+# the quota actually grants; four workers on four intra-op threads would put
+# sixteen spinning threads on a 4-core budget.
+INFER_WORKERS = _env_int(
+    "PARAKEET_INFER_WORKERS",
+    max(1, min(4, _available_logical // ORT_INTRA_THREADS)),
+)
 
 
 # ---------------------------------------------------------------------------

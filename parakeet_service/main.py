@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,15 +20,27 @@ def _shutdown_pool(pool: ThreadPoolExecutor) -> None:
     pool.shutdown(wait=True, cancel_futures=True)
 
 
+def _exit_without_join(message: str) -> None:
+    """Terminate the process while a native call is still running.
+
+    A wedged ORT call cannot be interrupted from Python. Every orderly path
+    out — the lifespan's ``worker.stop()`` and the interpreter's own exit —
+    joins the executor thread and would hang on it, so leave without one.
+    """
+    logger.critical(message)
+    logging.shutdown()
+    os._exit(1)
+
+
 async def _warmup(app: FastAPI) -> None:
     """Push one synthetic chunk through the real inference path.
 
     Failure is fatal. The chunk is what every real request looks like, so a
     model that cannot run it would 500 every request while passing readiness.
-    A timeout is fatal too: cancelling the wait leaves the job queued in the
-    worker, where it would hold the ORT executor after readiness was declared
-    — so rather than serve behind it, startup fails and the orchestrator
-    restarts the replica. ``PARAKEET_WARMUP_TIMEOUT_SEC`` bounds the wait.
+    A timeout is fatal too, and exits the process outright: cancelling the
+    wait leaves the ORT call running on a thread nothing can interrupt, so
+    the replica could neither serve past it nor shut down cleanly. The
+    orchestrator restarts it. ``PARAKEET_WARMUP_TIMEOUT_SEC`` bounds the wait.
     """
     started = time.perf_counter()
     try:
@@ -35,10 +49,12 @@ async def _warmup(app: FastAPI) -> None:
             timeout=WARMUP_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
-        raise RuntimeError(
+        message = (
             f"warm-up did not finish within {WARMUP_TIMEOUT_SEC:.0f}s; "
             "raise PARAKEET_WARMUP_TIMEOUT_SEC or set PARAKEET_WARMUP=false"
-        ) from None
+        )
+        _exit_without_join(message)
+        raise RuntimeError(message) from None  # only reached when _exit_without_join is stubbed
     except Exception as exc:
         raise RuntimeError("warm-up inference failed") from exc
     logger.info("Warm-up completed in %.2fs", time.perf_counter() - started)

@@ -142,6 +142,15 @@ def test_v1_co_mounted_cpu_cpuacct_directory_is_read(tmp_path):
     assert cgroup_cpu_limit(root, proc) == 2
 
 
+def test_v1_controller_directory_named_as_proc_lists_it(tmp_path):
+    # Some hosts spell the co-mount "cpuacct,cpu" with no "cpu" symlink; the
+    # controller string from /proc/self/cgroup is the directory name there.
+    root = tmp_path / "sys"
+    _write_v1(root, "200000", "100000", "docker/abc123", controller="cpuacct,cpu")
+    proc = _write_proc(tmp_path, "3:cpuacct,cpu:/docker/abc123\n")
+    assert cgroup_cpu_limit(root, proc) == 2
+
+
 def test_v1_tightest_nested_quota_wins(tmp_path):
     root = tmp_path / "sys"
     _write_v1(root, "100000", "100000", "a")
