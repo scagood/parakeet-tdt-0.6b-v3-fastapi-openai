@@ -16,15 +16,17 @@ permissions:
 
 jobs:
   build:
+    name: build (${{ matrix.flavor }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Emulated arm64 costs ~11 minutes, so only published images build it.
           - flavor: cpu
-            platforms: linux/amd64,linux/arm64
+            platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          # onnxruntime-gpu has no aarch64 wheels on PyPI
           - flavor: gpu
-            # onnxruntime-gpu has no aarch64 wheels on PyPI, so GPU is amd64-only
             platforms: linux/amd64
     steps:
       - uses: actions/checkout@v7
@@ -33,6 +35,8 @@ jobs:
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
 
       - uses: docker/setup-qemu-action@v4
+        if: contains(matrix.platforms, ',')
+
       - uses: docker/setup-buildx-action@v4
 
       - uses: docker/login-action@v4
@@ -63,4 +67,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.flavor }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
+          # A pull request cannot restore another's cache, so it only reads.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.flavor) || '' }}

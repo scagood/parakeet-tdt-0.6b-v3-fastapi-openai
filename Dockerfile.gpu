@@ -29,7 +29,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     # silero-vad hard-depends on torch, which it only uses for VAD tensor ops;
     # install the CPU-only build first so pip doesn't pull the multi-GB CUDA
     # torch wheels (inference runs through onnxruntime-gpu, not torch).
-    pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    # Both are pinned under silero-vad's torchaudio<2.10 cap, since past it
+    # the requirements install downgrades torchaudio and takes the PyPI CUDA
+    # torch with it.
+    pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .

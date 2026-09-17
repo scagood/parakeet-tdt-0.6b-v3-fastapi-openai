@@ -6,14 +6,15 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Dockerfile.cpu pins the CPU onnxruntime wheel outside requirements.txt",
+      "description": "Both Dockerfiles pin pip wheels that no built-in manager sees, currently the CPU onnxruntime build and the torch pair",
       "managerFilePatterns": [
-        "/(^|/)Dockerfile\\.cpu$/"
+        "/(?:^|/)Dockerfile(?:\\.(?:cpu|gpu))?$/"
       ],
+      "matchStringsStrategy": "recursive",
       "matchStrings": [
-        "onnxruntime==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
+        "pip install[^\\n]*",
+        "(?<depName>[A-Za-z][A-Za-z0-9._\\-]*)==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
       ],
-      "depNameTemplate": "onnxruntime",
       "datasourceTemplate": "pypi"
     }
   ],
@@ -28,6 +29,18 @@
         "onnxruntime-gpu"
       ],
       "groupName": "onnxruntime"
+    },
+    {
+      "description": "silero-vad caps torchaudio below 2.10 and each torchaudio pins its exact torch. Past that cap the requirements install downgrades torchaudio and drags torch plus the CUDA wheels in from PyPI, so hold the pair below it and move both in one PR.",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "matchPackageNames": [
+        "torch",
+        "torchaudio"
+      ],
+      "allowedVersions": "<2.10",
+      "groupName": "torch"
     }
   ]
 }
