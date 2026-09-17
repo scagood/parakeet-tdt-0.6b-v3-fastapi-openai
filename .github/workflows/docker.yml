@@ -21,10 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both images are amd64-only, so buildx builds natively and no QEMU
+          # setup is needed. The CPU image used to add linux/arm64, which was
+          # emulated and took ~11 of the job's ~20 minutes; deployment targets
+          # are amd64, so it is dropped until an arm64 host needs it.
           - flavor: cpu
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
           - flavor: gpu
-            # onnxruntime-gpu has no aarch64 wheels on PyPI, so GPU is amd64-only
+            # onnxruntime-gpu has no aarch64 wheels on PyPI anyway
             platforms: linux/amd64
     steps:
       - uses: actions/checkout@v7
@@ -32,7 +36,6 @@ jobs:
       - name: Free runner disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
 
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
       - uses: docker/login-action@v4
@@ -63,4 +66,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.flavor }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
+          # Export the cache only on pushes to main and tags. A pull request
+          # cannot read another PR's cache, so exporting there spent ~8 minutes
+          # writing a cache nothing would ever restore; PR builds still read
+          # main's.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.flavor) || '' }}
