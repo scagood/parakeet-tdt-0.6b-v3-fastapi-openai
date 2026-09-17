@@ -29,14 +29,24 @@ RUN pip install --no-cache-dir --upgrade pip && \
     # installs the newest pair, the requirements install below then downgrades
     # torchaudio to satisfy silero-vad, and that downgrade takes torch 2.9.1
     # and ~3.7GB of CUDA wheels from PyPI with it, undoing this step.
-    # Renovate deliberately does not manage these two: a bump past the
-    # silero-vad cap would bring the CUDA wheels back silently.
+    # Renovate tracks both pins and is held below that cap in
+    # .github/renovate.json, and the check after this layer fails the build if
+    # a CUDA wheel ever lands here anyway.
     pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu && \
     grep -v '^onnxruntime-gpu' requirements.txt > /tmp/requirements.cpu.txt && \
     pip install --no-cache-dir -r /tmp/requirements.cpu.txt && \
     # Must track the onnxruntime-gpu pin in requirements.txt: the CPU and
     # GPU images are expected to run the same ONNX Runtime build.
     pip install --no-cache-dir onnxruntime==1.30.0
+
+# Nothing in the CPU image should install an NVIDIA wheel. If a torch bump
+# ever escapes the silero-vad cap above, the requirements install pulls the
+# CUDA build back in, adding ~3.7GB no CPU deployment can use; fail the build
+# instead of shipping it.
+RUN if pip list --format=freeze | grep '^nvidia-'; then \
+        echo "ERROR: CUDA wheels installed in the CPU image, see the torch pin above" >&2; \
+        exit 1; \
+    fi
 
 COPY server.py .
 COPY parakeet_service/ parakeet_service/

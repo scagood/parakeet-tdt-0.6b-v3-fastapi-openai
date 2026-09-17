@@ -35,8 +35,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     # installs the newest pair, the requirements install below then downgrades
     # torchaudio to satisfy silero-vad, and that downgrade takes torch 2.9.1
     # and the CUDA wheels from PyPI with it, undoing this step. Renovate
-    # deliberately does not manage these two: a bump past the silero-vad cap
-    # would bring the CUDA wheels back silently.
+    # tracks both pins and is held below that cap in .github/renovate.json.
     pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
