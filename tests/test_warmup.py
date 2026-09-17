@@ -1,8 +1,8 @@
 """Startup warm-up pass.
 
 ORT defers kernel selection to the first inference, so the warm-up moves that
-cost ahead of the readiness probe. It must never be able to keep an otherwise
-healthy replica from serving.
+cost ahead of the readiness probe. Because the warm-up chunk is exactly what a
+real request looks like, a replica that cannot run it must not report ready.
 """
 from __future__ import annotations
 
@@ -58,24 +58,28 @@ async def test_warmup_submits_the_default_model():
 
 
 @pytest.mark.asyncio
-async def test_warmup_swallows_inference_errors():
+async def test_warmup_propagates_inference_errors():
     async def submit(_wav, _model_name):
         raise RuntimeError("model exploded")
 
-    # Must return normally: startup continues even when warm-up fails.
-    await main._warmup(_app_with_worker(submit))
+    with pytest.raises(RuntimeError, match="warm-up inference failed") as info:
+        await main._warmup(_app_with_worker(submit))
+
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert "model exploded" in str(info.value.__cause__)
 
 
 @pytest.mark.asyncio
-async def test_warmup_gives_up_on_a_stuck_worker(monkeypatch):
-    monkeypatch.setattr(main, "_WARMUP_TIMEOUT_SEC", 0.01)
+async def test_warmup_fails_on_a_stuck_worker(monkeypatch):
+    monkeypatch.setattr(main, "WARMUP_TIMEOUT_SEC", 0.01)
     started = asyncio.Event()
 
     async def submit(_wav, _model_name):
         started.set()
         await asyncio.sleep(60)
 
-    await main._warmup(_app_with_worker(submit))
+    with pytest.raises(RuntimeError, match="did not finish within"):
+        await main._warmup(_app_with_worker(submit))
 
     assert started.is_set()
 
@@ -134,7 +138,12 @@ async def test_lifespan_reports_ready_when_warmup_is_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_still_reports_ready_when_warmup_fails(monkeypatch):
+async def test_lifespan_fails_startup_when_warmup_fails(monkeypatch):
+    """A model that cannot run the warm-up chunk would 500 every request.
+
+    Failing startup makes that visible to the orchestrator instead of letting
+    the replica pass readiness and take traffic.
+    """
     from fastapi import FastAPI
 
     app = FastAPI()
@@ -147,8 +156,11 @@ async def test_lifespan_still_reports_ready_when_warmup_fails(monkeypatch):
     monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
     monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
 
-    async with main.lifespan(app):
-        assert app.state.ready is True
+    with pytest.raises(RuntimeError, match="warm-up inference failed"):
+        async with main.lifespan(app):
+            pytest.fail("lifespan must not reach the serving phase")
+
+    assert app.state.ready is False
 
 
 def test_warmup_input_matches_a_real_chunk():

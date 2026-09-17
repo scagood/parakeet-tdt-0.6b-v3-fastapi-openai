@@ -146,14 +146,15 @@ For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pin
 
 * `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
 * `PARAKEET_ORT_INTER_THREADS`: ONNX Runtime inter-op threads. Defaults to `1`, which is best for single-model inference. Minimum: `1`.
+* `PARAKEET_INFER_WORKERS`: concurrent single-item inference calls on CPU (`PARAKEET_BATCHED=0`). Defaults to `4`, clamped to the available logical CPUs after the cgroup quota is applied. Minimum: `1`.
 * `PARAKEET_WAITRESS_THREADS`: HTTP worker threads. Defaults to a conservative value to avoid oversubscribing ONNX Runtime's AVX2 worker pool. Minimum: `1`.
 
 ### Running under an orchestrator
 
 Two defaults matter when replicas start and stop frequently:
 
-* **CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is invisible to `sched_getaffinity()` and `psutil`, which keep reporting the node's full core count. Thread pools are now sized from the cgroup quota when one is present, so a 4-core pod no longer starts dozens of ORT threads. `/health` reports `cgroup_quota` next to the detected core counts so you can confirm what was applied.
-* **Cold start.** `PARAKEET_WARMUP` (on by default) pushes one synthetic chunk through the model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
+* **CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is invisible to `sched_getaffinity()` and `psutil`, which keep reporting the node's full core count. Thread pools are now sized from the cgroup quota when one is present, so a 4-core pod no longer starts dozens of ORT threads. The quota is read from the process's own cgroup (via `/proc/self/cgroup`) and its ancestors, so it is found under systemd `CPUQuota=` and `--cgroupns=host` as well as in a private cgroup namespace. `/health` reports `cgroup_quota` next to the detected core counts so you can confirm what was applied.
+* **Cold start.** `PARAKEET_WARMUP` (on by default) pushes one synthetic chunk through the model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. A warm-up that fails, or exceeds `PARAKEET_WARMUP_TIMEOUT_SEC` (default `120`), fails startup rather than reporting a replica ready that cannot run inference — raise the timeout on a slow host, or set `PARAKEET_WARMUP=false` to skip it. Container healthcheck `start_period` values in the Dockerfiles and `docker-compose.yml` allow for model load plus this timeout. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
 
 ## Installation
 

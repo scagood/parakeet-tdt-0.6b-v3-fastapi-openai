@@ -177,7 +177,6 @@ GPU_DEVICE_ID = _env_int("PARAKEET_GPU_DEVICE_ID", 0, minimum=0)
 BATCHED = _env_bool("PARAKEET_BATCHED", USE_GPU != "false")
 MAX_BATCH_SIZE = _env_int("PARAKEET_MAX_BATCH_SIZE", 4)
 BATCH_WINDOW_MS = _env_float("PARAKEET_BATCH_WINDOW_MS", 4.0, minimum=0.0)
-INFER_WORKERS = _env_int("PARAKEET_INFER_WORKERS", 4)
 
 # ONNX Runtime defers kernel selection and arena allocation to the first
 # inference, so a freshly started replica serves its first real request well
@@ -186,6 +185,10 @@ INFER_WORKERS = _env_int("PARAKEET_INFER_WORKERS", 4)
 # already waiting on the readiness probe.
 WARMUP = _env_bool("PARAKEET_WARMUP", True)
 WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
+# A warm-up that fails or exceeds this bound fails startup: a replica whose
+# model cannot run one synthetic chunk would 500 every real request, and an
+# orchestrator restarts a crashed replica faster than it notices a sick one.
+WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.0)
 
 MAX_UPLOAD_BYTES = _env_int(
     "PARAKEET_MAX_UPLOAD_BYTES", 256 * 1024 * 1024, minimum=1
@@ -204,6 +207,7 @@ UPLOAD_READ_CHUNK_BYTES = min(1024 * 1024, MAX_UPLOAD_BYTES)
 # CPU/ORT threading
 # ---------------------------------------------------------------------------
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+PROC_CGROUP = Path("/proc/self/cgroup")
 
 
 def _read_cgroup_file(path: Path) -> Optional[str]:
@@ -226,7 +230,35 @@ def _quota_to_cpus(quota_raw: str, period_raw: str) -> Optional[int]:
     return max(1, math.ceil(quota / period))
 
 
-def cgroup_cpu_limit(root: Path = CGROUP_ROOT) -> Optional[int]:
+def _own_cgroup_paths(proc_cgroup: Path) -> tuple[Optional[str], Optional[str]]:
+    """Return this process's (v2, v1 cpu) cgroup paths from ``/proc/self/cgroup``.
+
+    Each line is ``<id>:<controllers>:<path>``; the v2 (unified) entry has an
+    empty controller list. Either path is ``None`` when its hierarchy is absent.
+    """
+    v2_path = v1_path = None
+    text = _read_cgroup_file(proc_cgroup)
+    for line in (text or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        _hierarchy_id, controllers, path = parts
+        if controllers == "":
+            v2_path = path
+        elif "cpu" in controllers.split(","):
+            v1_path = path
+    return v2_path, v1_path
+
+
+def _cgroup_and_ancestors(path: Optional[str]) -> list[Path]:
+    """Relative cgroup path followed by each ancestor up to the root."""
+    relative = Path((path or "/").lstrip("/"))
+    return [relative, *relative.parents]
+
+
+def cgroup_cpu_limit(
+    root: Path = CGROUP_ROOT, proc_cgroup: Path = PROC_CGROUP
+) -> Optional[int]:
     """Return the CPU count this cgroup's CFS quota allows, else ``None``.
 
     A Kubernetes ``resources.limits.cpu`` is a CFS *quota*, not a cpuset, so
@@ -234,20 +266,46 @@ def cgroup_cpu_limit(root: Path = CGROUP_ROOT) -> Optional[int]:
     node's full core count from inside a limited pod. Sizing thread pools from
     those numbers oversubscribes the quota badly — a 4-core pod on a 64-core
     node would otherwise start 64 ORT intra-op threads and thrash.
-    """
-    # cgroup v2: a single "<quota> <period>" line; quota is "max" when unset.
-    v2 = _read_cgroup_file(root / "cpu.max")
-    if v2:
-        parts = v2.split()
-        if len(parts) == 2:
-            return None if parts[0] == "max" else _quota_to_cpus(parts[0], parts[1])
 
-    # cgroup v1: separate quota/period files, quota of -1 when unset.
-    quota = _read_cgroup_file(root / "cpu" / "cpu.cfs_quota_us")
-    period = _read_cgroup_file(root / "cpu" / "cpu.cfs_period_us")
-    if quota is not None and period is not None:
-        return _quota_to_cpus(quota, period)
-    return None
+    The quota is looked up on the process's own cgroup, resolved through
+    ``/proc/self/cgroup``, and on every ancestor: with a private cgroup
+    namespace (the Docker and Kubernetes default) the process sits at the
+    mount root, but under systemd ``CPUQuota=`` or ``--cgroupns=host`` it is
+    nested several levels down and the mount root reports no limit at all.
+    Nested quotas compose as a minimum, so the tightest one wins.
+    """
+    v2_path, v1_path = _own_cgroup_paths(proc_cgroup)
+    limits: list[int] = []
+
+    # cgroup v2: a single "<quota> <period>" line; quota is "max" when unset.
+    unified = False
+    for relative in _cgroup_and_ancestors(v2_path):
+        raw = _read_cgroup_file(root / relative / "cpu.max")
+        if raw is None:
+            continue
+        unified = True
+        parts = raw.split()
+        if len(parts) == 2 and parts[0] != "max":
+            cpus = _quota_to_cpus(parts[0], parts[1])
+            if cpus is not None:
+                limits.append(cpus)
+    if unified:
+        return min(limits) if limits else None
+
+    # cgroup v1: separate quota/period files, quota of -1 when unset. The cpu
+    # controller is mounted as "cpu" or co-mounted as "cpu,cpuacct".
+    for relative in _cgroup_and_ancestors(v1_path):
+        for controller_dir in ("cpu", "cpu,cpuacct"):
+            cpu_dir = root / controller_dir / relative
+            quota = _read_cgroup_file(cpu_dir / "cpu.cfs_quota_us")
+            period = _read_cgroup_file(cpu_dir / "cpu.cfs_period_us")
+            if quota is None or period is None:
+                continue
+            cpus = _quota_to_cpus(quota, period)
+            if cpus is not None:
+                limits.append(cpus)
+            break
+    return min(limits) if limits else None
 
 
 try:
@@ -282,6 +340,10 @@ DEFAULT_INTRA = 1 if USE_GPU != "false" else min(_physical, _available_logical)
 ORT_INTRA_THREADS = _env_int("PARAKEET_ORT_INTRA_THREADS", DEFAULT_INTRA)
 ORT_INTER_THREADS = _env_int("PARAKEET_ORT_INTER_THREADS", 1)
 AUDIO_WORKERS = _env_int("PARAKEET_AUDIO_WORKERS", min(8, _physical))
+# Each InferencePool worker runs its own ORT call with ORT_INTRA_THREADS
+# threads, so the pool must not outnumber the CPUs the quota actually grants:
+# a 1-core pod running four concurrent sessions just timeshares one core.
+INFER_WORKERS = _env_int("PARAKEET_INFER_WORKERS", max(1, min(4, _available_logical)))
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +366,7 @@ CPU_INFO = {
     "ort_intra": ORT_INTRA_THREADS,
     "ort_inter": ORT_INTER_THREADS,
     "audio_workers": AUDIO_WORKERS,
+    "infer_workers": INFER_WORKERS,
 }
 
 if CPU_QUOTA is not None and CPU_QUOTA < _detected_logical:

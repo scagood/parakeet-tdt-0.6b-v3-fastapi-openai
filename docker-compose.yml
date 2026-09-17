@@ -32,7 +32,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 240s
 
   # CPU-only deployment (explicit profile)
   parakeet-cpu:
@@ -55,7 +55,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 180s
 
 volumes:
   parakeet-models:
