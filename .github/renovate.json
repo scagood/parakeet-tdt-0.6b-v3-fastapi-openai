@@ -6,12 +6,14 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Both Dockerfiles pin pip wheels that no built-in manager sees: the CPU onnxruntime build and the CPU torch pair",
+      "description": "Both Dockerfiles pin pip wheels that no built-in manager sees, currently the CPU onnxruntime build and the torch pair",
       "managerFilePatterns": [
         "/(^|/)Dockerfile\\.(cpu|gpu)$/"
       ],
+      "matchStringsStrategy": "recursive",
       "matchStrings": [
-        "(?<depName>onnxruntime|torchaudio|torch)==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
+        "pip install[^\\n]*",
+        "(?<depName>[A-Za-z][A-Za-z0-9._\\-]*)==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
       ],
       "datasourceTemplate": "pypi"
     }
