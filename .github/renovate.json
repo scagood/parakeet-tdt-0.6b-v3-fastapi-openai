@@ -6,24 +6,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Dockerfile.cpu pins the CPU onnxruntime wheel outside requirements.txt",
-      "managerFilePatterns": [
-        "/(^|/)Dockerfile\\.cpu$/"
-      ],
-      "matchStrings": [
-        "onnxruntime==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
-      ],
-      "depNameTemplate": "onnxruntime",
-      "datasourceTemplate": "pypi"
-    },
-    {
-      "customType": "regex",
-      "description": "Both Dockerfiles pin the CPU torch pair outside requirements.txt",
+      "description": "Both Dockerfiles pin pip wheels that no built-in manager sees: the CPU onnxruntime build and the CPU torch pair",
       "managerFilePatterns": [
         "/(^|/)Dockerfile\\.(cpu|gpu)$/"
       ],
       "matchStrings": [
-        "(?<depName>torchaudio|torch)==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
+        "(?<depName>onnxruntime|torchaudio|torch)==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
       ],
       "datasourceTemplate": "pypi"
     }
