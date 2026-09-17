@@ -2,5 +2,32 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>darksheepsoftware/.github:renovate-config"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Dockerfile.cpu pins the CPU onnxruntime wheel outside requirements.txt",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile\\.cpu$/"
+      ],
+      "matchStrings": [
+        "onnxruntime==(?<currentValue>[0-9][0-9a-zA-Z.\\-]*)"
+      ],
+      "depNameTemplate": "onnxruntime",
+      "datasourceTemplate": "pypi"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Move the CPU and GPU ONNX Runtime wheels in one PR so the images stay on the same build",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "matchPackageNames": [
+        "onnxruntime",
+        "onnxruntime-gpu"
+      ],
+      "groupName": "onnxruntime"
+    }
   ]
 }
