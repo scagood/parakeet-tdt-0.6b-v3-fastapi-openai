@@ -16,25 +16,38 @@ permissions:
 
 jobs:
   build:
+    # Named explicitly so the check name stays `build (cpu)` / `build (gpu)`
+    # instead of tracking the matrix's platform strings.
+    name: build (${{ matrix.flavor }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Both images are amd64-only, so buildx builds natively and no QEMU
-          # setup is needed. The CPU image used to add linux/arm64, which was
-          # emulated and took ~11 of the job's ~20 minutes; deployment targets
-          # are amd64, so it is dropped until an arm64 host needs it.
+          # `platforms` is what a pull request builds, `publish_platforms` what
+          # a push to main or a tag publishes. linux/arm64 is emulated under
+          # QEMU and cost ~11 of the job's ~20 minutes, which is worth paying
+          # on the images people pull and not on every pull request. The
+          # tradeoff is that an arm64-only build break surfaces on main rather
+          # than on the pull request that caused it.
           - flavor: cpu
             platforms: linux/amd64
+            publish_platforms: linux/amd64,linux/arm64
           - flavor: gpu
-            # onnxruntime-gpu has no aarch64 wheels on PyPI anyway
+            # onnxruntime-gpu has no aarch64 wheels on PyPI, so GPU is
+            # amd64-only either way
             platforms: linux/amd64
+            publish_platforms: linux/amd64
     steps:
       - uses: actions/checkout@v7
 
       - name: Free runner disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      # Only the published cpu image needs emulation; pull request builds are
+      # native amd64.
+      - uses: docker/setup-qemu-action@v4
+        if: github.event_name != 'pull_request' && matrix.flavor == 'cpu'
 
       - uses: docker/setup-buildx-action@v4
 
@@ -61,7 +74,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.${{ matrix.flavor }}
-          platforms: ${{ matrix.platforms }}
+          platforms: ${{ github.event_name == 'pull_request' && matrix.platforms || matrix.publish_platforms }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
