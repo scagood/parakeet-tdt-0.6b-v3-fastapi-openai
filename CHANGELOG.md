@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.5.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.4.0...v1.5.0) (2026-09-17)
+
+
+### 🌟 Features
+
+* **service:** size thread pools from cgroup quota, warm up before ready ([#7](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/7)) ([432f728](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/432f728b333c9c53fd0bfc630e049a029aaee005))
+
+
+### 🩹 Fixes
+
+* **docker:** stop the CPU image pulling CUDA wheels, drop emulated arm64 from PRs ([#10](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/10)) ([db30a89](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/db30a89e7e19266e038ab76e30e4c5ac907ca560))
+
+
+### 🧹 Chores
+
+* **renovate:** track the Dockerfile.cpu pin and group it with onnxruntime-gpu ([#9](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/9)) ([494e08b](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/494e08b8451b74b570840823318b784ea48b599e))
+
 ## [1.4.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.3.0...v1.4.0) (2026-08-05)
 
 
