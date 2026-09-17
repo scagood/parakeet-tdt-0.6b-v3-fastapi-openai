@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     grep -v '^onnxruntime-gpu' requirements.txt > /tmp/requirements.cpu.txt && \
     pip install --no-cache-dir -r /tmp/requirements.cpu.txt && \
-    pip install --no-cache-dir onnxruntime==1.23.2
+    # Must track the onnxruntime-gpu pin in requirements.txt: the CPU and
+    # GPU images are expected to run the same ONNX Runtime build.
+    pip install --no-cache-dir onnxruntime==1.30.0
 
 COPY server.py .
 COPY parakeet_service/ parakeet_service/
