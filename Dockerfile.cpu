@@ -22,16 +22,10 @@ COPY requirements.txt .
 # only the execution-provider wheel with the CPU build.
 RUN pip install --no-cache-dir --upgrade pip && \
     # silero-vad hard-depends on torch; install the CPU-only build first so
-    # pip doesn't pull the multi-GB CUDA torch wheels from PyPI.
-    #
-    # Both versions are pinned because silero-vad caps torchaudio at <2.10 and
-    # each torchaudio release pins its exact torch. Unpinned, this line
-    # installs the newest pair, the requirements install below then downgrades
-    # torchaudio to satisfy silero-vad, and that downgrade takes torch 2.9.1
-    # and ~3.7GB of CUDA wheels from PyPI with it, undoing this step.
-    # Renovate tracks both pins and is held below that cap in
-    # .github/renovate.json, and the check after this layer fails the build if
-    # a CUDA wheel ever lands here anyway.
+    # pip doesn't pull the multi-GB CUDA torch wheels from PyPI. Both are
+    # pinned under silero-vad's torchaudio<2.10 cap, since past it the
+    # requirements install downgrades torchaudio and takes the CUDA wheels
+    # with it.
     pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu && \
     grep -v '^onnxruntime-gpu' requirements.txt > /tmp/requirements.cpu.txt && \
     pip install --no-cache-dir -r /tmp/requirements.cpu.txt && \
@@ -39,10 +33,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     # GPU images are expected to run the same ONNX Runtime build.
     pip install --no-cache-dir onnxruntime==1.30.0
 
-# Nothing in the CPU image should install an NVIDIA wheel. If a torch bump
-# ever escapes the silero-vad cap above, the requirements install pulls the
-# CUDA build back in, adding ~3.7GB no CPU deployment can use; fail the build
-# instead of shipping it.
+# Nothing in the CPU image should install an NVIDIA wheel; ~3.7GB of them
+# arrive if the torch pins above ever escape the cap.
 RUN if pip list --format=freeze | grep '^nvidia-'; then \
         echo "ERROR: CUDA wheels installed in the CPU image, see the torch pin above" >&2; \
         exit 1; \

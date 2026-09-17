@@ -16,26 +16,19 @@ permissions:
 
 jobs:
   build:
-    # Named explicitly so the check name stays `build (cpu)` / `build (gpu)`
-    # instead of tracking the matrix's platform strings.
     name: build (${{ matrix.flavor }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # `platforms` is what a pull request builds, `publish_platforms` what
-          # a push to main or a tag publishes. linux/arm64 is emulated under
-          # QEMU and cost ~11 of the job's ~20 minutes, which is worth paying
-          # on the images people pull and not on every pull request. The
-          # tradeoff is that an arm64-only build break surfaces on main rather
-          # than on the pull request that caused it.
+          # Emulated arm64 costs ~11 minutes, so pull requests build
+          # `platforms` and only published images build `publish_platforms`.
           - flavor: cpu
             platforms: linux/amd64
             publish_platforms: linux/amd64,linux/arm64
+          # onnxruntime-gpu has no aarch64 wheels on PyPI
           - flavor: gpu
-            # onnxruntime-gpu has no aarch64 wheels on PyPI, so GPU is
-            # amd64-only either way
             platforms: linux/amd64
             publish_platforms: linux/amd64
     steps:
@@ -44,8 +37,6 @@ jobs:
       - name: Free runner disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
 
-      # Only the published cpu image needs emulation; pull request builds are
-      # native amd64.
       - uses: docker/setup-qemu-action@v4
         if: github.event_name != 'pull_request' && matrix.flavor == 'cpu'
 
@@ -79,8 +70,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.flavor }}
-          # Export the cache only on pushes to main and tags. A pull request
-          # cannot read another PR's cache, so exporting there spent ~8 minutes
-          # writing a cache nothing would ever restore; PR builds still read
-          # main's.
+          # A pull request cannot restore another's cache, so it only reads.
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.flavor) || '' }}
