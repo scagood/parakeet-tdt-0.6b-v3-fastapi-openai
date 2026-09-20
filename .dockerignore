@@ -35,7 +35,6 @@ models/
 # Test files
 test_*.py
 benchmark.py
-inspect_model.py
 
 # Docker
 Dockerfile*
