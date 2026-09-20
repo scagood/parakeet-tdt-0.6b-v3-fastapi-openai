@@ -26,7 +26,8 @@
   "packages": {
     ".": {
       "extra-files": [
-        { "type": "generic", "path": "parakeet_service/main.py" }
+        { "type": "generic", "path": "parakeet_service/main.py" },
+        { "type": "generic", "path": "pyproject.toml" }
       ]
     }
   }

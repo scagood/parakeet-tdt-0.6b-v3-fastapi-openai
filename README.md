@@ -1,6 +1,6 @@
 # Parakeet TDT Transcription with ONNX Runtime
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Parakeet TDT** is a high-performance implementation of NVIDIA's [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) model using [ONNX Runtime](https://onnxruntime.ai/), designed for ultra-fast inference on CPU.
@@ -11,7 +11,7 @@ This implementation achieves exceptional real-time speeds, outperforming standar
 
 A refactored async service lives under [`parakeet_service/`](parakeet_service/)
 and is started via [`server.py`](server.py). It keeps the OpenAI-compatible
-contract of the legacy [`app.py`](app.py) but adds:
+contract of the previous Flask service but adds:
 
 - In-process audio decode (single `ffmpeg` per request, none per chunk)
 - **Silero-VAD auto-chunking** that splits long files on pause midpoints
@@ -137,7 +137,7 @@ Additional benchmark on real-world YouTube content across multiple languages:
 ## Requirements
 
 *   [Docker](https://docs.docker.com/get-docker/) (Recommended)
-*   Or: Python 3.11+ and [FFmpeg](https://ffmpeg.org/)
+*   Or: Python 3.14 and [FFmpeg](https://ffmpeg.org/)
 
 ### CPU Optimization
 ONNX Runtime's CPU execution provider automatically dispatches AVX2/FMA kernels from the standard wheel when the host CPU supports them. The server now detects AVX2 at startup, reports the result in `/health`, and configures ONNX Runtime threading to use the available physical CPU cores while preventing NumPy/BLAS thread pools from competing with inference.
@@ -147,7 +147,6 @@ For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pin
 * `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
 * `PARAKEET_ORT_INTER_THREADS`: ONNX Runtime inter-op threads. Defaults to `1`, which is best for single-model inference. Minimum: `1`.
 * `PARAKEET_INFER_WORKERS`: concurrent single-item inference calls on CPU (`PARAKEET_BATCHED=0`). Defaults to the available logical CPUs (after the cgroup quota is applied) divided by `PARAKEET_ORT_INTRA_THREADS`, capped at `4`, so workers × intra-op threads fits the CPU budget. Minimum: `1`.
-* `PARAKEET_WAITRESS_THREADS`: HTTP worker threads. Defaults to a conservative value to avoid oversubscribing ONNX Runtime's AVX2 worker pool. Minimum: `1`.
 
 ### Running under an orchestrator
 
@@ -183,7 +182,7 @@ The server will be available at `http://localhost:5092`. See [DOCKER.md](DOCKER.
 For development or customization:
 
 ```bash
-conda create -n parakeet-onnx python=3.12
+conda create -n parakeet-onnx python=3.14
 conda activate parakeet-onnx
 git clone https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
 cd parakeet-tdt-0.6b-v3-fastapi-openai
@@ -198,7 +197,7 @@ Parakeet TDT provides an OpenAI-compatible API server.
 
 ```bash
 conda activate parakeet-onnx
-python app.py
+python server.py
 ```
 *   **Port**: 5092
 *   **Docs**: [http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)
@@ -246,12 +245,14 @@ transcript = client.audio.transcriptions.create(
 )
 ```
 
-### Web Interface
+### Interactive API docs
 
-The server includes a built-in web interface for testing and easy drag-and-drop transcription.
-Access it at: **[http://127.0.0.1:5092](http://127.0.0.1:5092)**
+The server exposes Swagger UI for trying requests from the browser, including
+picking a model variant per request.
+Access it at: **[http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)**
 
-The web interface includes a dropdown menu to select between INT8, FP16, and FP32 model variants.
+There is no longer a drag-and-drop upload page: it belonged to the removed
+Flask service and was never served by `server.py`.
 
 ## 🔌 Open WebUI Integration
 
@@ -262,7 +263,7 @@ The web interface includes a dropdown menu to select between INT8, FP16, and FP3
 1.  **Start the Parakeet Server** (if not already running):
     ```bash
     conda activate parakeet-onnx
-    python app.py
+    python server.py
     ```
     The server will be available at `http://127.0.0.1:5092`
 
