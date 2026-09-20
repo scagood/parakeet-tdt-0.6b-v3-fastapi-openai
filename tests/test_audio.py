@@ -171,3 +171,51 @@ def test_in_process_decode_agrees_with_ffmpeg(channels, width):
     assert ours.size == theirs.size
     # ffmpeg emits s16, so it quantizes; one LSB of int16 is the tolerance.
     np.testing.assert_allclose(ours, theirs, atol=2 / 32768)
+
+
+# --- the ffmpeg path, which carries everything not already at 16 kHz ---------
+
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
+)
+
+
+def tone_wav(seconds: float, *, rate: int, channels: int) -> bytes:
+    frames = int(rate * seconds)
+    t = np.arange(frames) / rate
+    wave_data = np.sin(2 * np.pi * 440 * t) * 0.6
+    if channels == 2:
+        wave_data = np.repeat(wave_data, 2)
+    return build_wav((wave_data * 32767).astype("<i2").tobytes(), rate=rate, channels=channels)
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("rate,channels", [(44_100, 2), (48_000, 2), (22_050, 1), (8_000, 1)])
+def test_ffmpeg_resamples_to_mono_16k(rate, channels):
+    result = audio.load_audio(tone_wav(0.5, rate=rate, channels=channels))
+    assert result.dtype == np.float32
+    assert result.ndim == 1
+    assert abs(result.size - TARGET_SR // 2) < TARGET_SR // 50  # ~0.5 s, ±20 ms
+    assert np.isfinite(result).all()
+    assert 0.2 < float(np.abs(result).max()) <= 1.0
+
+
+@requires_ffmpeg
+def test_ffmpeg_decode_reports_undecodable_input():
+    with pytest.raises(RuntimeError, match="ffmpeg decode failed"):
+        audio._ffmpeg_decode(b"RIFF\x00\x00\x00\x00WAVEjunk" + b"\x00" * 64)
+
+
+@requires_ffmpeg
+def test_ffmpeg_decode_handles_a_non_wav_container():
+    # Ask ffmpeg for a FLAC, then feed it back through the decoder.
+    import subprocess
+
+    source = tone_wav(0.25, rate=44_100, channels=2)
+    flac = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "flac", "pipe:1"],
+        input=source, capture_output=True, check=True,
+    ).stdout
+    assert audio._wav_info(flac) is None  # not a WAV, so the fast path declines it
+    result = audio.load_audio(flac)
+    assert result.ndim == 1 and result.size > 0 and np.isfinite(result).all()
