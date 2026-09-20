@@ -11,4 +11,5 @@ onnxruntime-gpu[cuda,cudnn]==1.30.0
 numpy<3
 
 # CPU-only deployments replace onnxruntime-gpu with onnxruntime and run with:
-# PARAKEET_USE_GPU=false PARAKEET_DEFAULT_MODEL=parakeet-tdt-0.6b-v3 PARAKEET_BATCHED=0
+# PARAKEET_USE_GPU=false PARAKEET_BATCHED=0
+# (PARAKEET_USE_GPU=false already selects the CPU default, parakeet-v3-fp32)
