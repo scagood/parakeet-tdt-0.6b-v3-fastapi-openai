@@ -26,10 +26,11 @@ Compared to the legacy Flask+Waitress service on a 12700KF CPU:
 | 300 s file (single)     | 17.96 s / 15.7×   | **10.41 s / 27.2×**| **+73%** |
 | 16× 10 s concurrent     | 34.6× throughput  | **39.3× throughput**| +13%    |
 
-The default backend is now the fastest stable RTX 3090 profile measured:
-FP32 + CUDA + GPU micro-batching.
+The service defaults to CUDA with GPU micro-batching. The numbers below were
+measured on the FP32 profile, which was the default when they were taken; the
+GPU default is now `parakeet-v3-fp16`, which halves VRAM at the same output.
 
-| Workload                | CPU optimized      | GPU profile        | Δ        |
+| Workload                | CPU optimized      | GPU profile (FP32) | Δ        |
 |-------------------------|--------------------|--------------------|----------|
 | 300 s file (single)     | 10.41 s / 27.2×    | **1.37 s / 205.9×**| **+7.6×** |
 | 16× 10 s concurrent     | 39.3× throughput   | **200.3× throughput**| **+5.1×** |
@@ -40,9 +41,8 @@ rationale, and tunable env knobs.
 ```bash
 python server.py                  # serve on :5092
 
-# CPU override
+# CPU override (selects parakeet-v3-fp32, the CPU default)
 PARAKEET_USE_GPU=false \
-PARAKEET_DEFAULT_MODEL=parakeet-tdt-0.6b-v3 \
 PARAKEET_BATCHED=0 \
 python server.py
 ```
@@ -163,7 +163,7 @@ The easiest way to get started. No dependencies to install!
 
 **CPU Deployment:**
 ```bash
-git clone https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
+git clone https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai
 cd parakeet-tdt-0.6b-v3-fastapi-openai
 docker compose up parakeet-cpu -d
 ```
@@ -184,7 +184,7 @@ For development or customization:
 ```bash
 conda create -n parakeet-onnx python=3.14
 conda activate parakeet-onnx
-git clone https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
+git clone https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai
 cd parakeet-tdt-0.6b-v3-fastapi-openai
 pip install -r requirements.txt
 ```
@@ -218,7 +218,7 @@ client = OpenAI(
 
 audio_file = open("audio.mp3", "rb")
 transcript = client.audio.transcriptions.create(
-  model="parakeet-tdt-0.6b-v3",  # or "istupakov/parakeet-tdt-0.6b-v3-onnx" or "grikdotnet/parakeet-tdt-0.6b-fp16"
+  model="parakeet-v3-fp32",  # omit to use the server default; see Model Selection
   file=audio_file,
   response_format="text"
 )
@@ -228,24 +228,56 @@ print(transcript)
 
 ### Model Selection
 
-The API supports multiple model variants with different precision levels:
+Six variants are served. `GET /v1/models` returns these names, each with its
+aliases in an `aliases` field; `GET /v1/models/{id}` accepts either form.
 
-| Model Name | Precision | Speed | Description |
-|------------|-----------|-------|-------------|
-| `parakeet-tdt-0.6b-v3` | INT8 | Fastest | Default model with 8-bit quantization (recommended) |
-| `istupakov/parakeet-tdt-0.6b-v3-onnx` | FP32 | Slower | Full precision for maximum accuracy |
-| `grikdotnet/parakeet-tdt-0.6b-fp16` | FP16 | Medium | Half precision, balanced speed and accuracy |
+| Model Name | Precision | ONNX weights | Languages | Former names, still accepted |
+|------------|-----------|--------------|-----------|------------------------------|
+| `parakeet-v3-fp32` | FP32 | `istupakov/parakeet-tdt-0.6b-v3-onnx` | 25 | `parakeet-v3`, `istupakov/parakeet-tdt-0.6b-v3-onnx` |
+| `parakeet-v3-fp16` | FP16 | `grikdotnet/parakeet-tdt-0.6b-fp16` | 25 | `grikdotnet/parakeet-tdt-0.6b-fp16` |
+| `parakeet-v3-int8` | INT8 | `nemo-parakeet-tdt-0.6b-v3` | 25 | `parakeet-tdt-0.6b-v3` |
+| `parakeet-v2-fp32` | FP32 | `istupakov/parakeet-tdt-0.6b-v2-onnx` | English only | `parakeet-v2`, `istupakov/parakeet-tdt-0.6b-v2-onnx` |
+| `parakeet-v2-fp16` | FP16 | `ysdede/parakeet-tdt-0.6b-v2-onnx` | English only | — |
+| `parakeet-v2-int8` | INT8 | `nemo-parakeet-tdt-0.6b-v2` | English only | `parakeet-tdt-0.6b-v2` |
 
-Models are lazy-loaded on first use and cached for subsequent requests. The default INT8 model is pre-loaded at startup.
+**Defaults.** FP16 halves VRAM at identical output on GPU, so a GPU deployment
+defaults to `parakeet-v3-fp16`. On CPU, ONNX Runtime upcasts FP16 (slower), so
+`PARAKEET_USE_GPU=false` defaults to `parakeet-v3-fp32`. With
+`PARAKEET_USE_GPU=auto` the choice is made at startup by probing whether CUDA
+actually loads on the host. `PARAKEET_DEFAULT_MODEL` overrides all three, and
+`GET /health` reports the model that was resolved.
+
+INT8 is the fastest on CPU but measurably drops words after silences, and the
+multilingual benchmark above shows it ~4 WER points worse than FP32 on Spanish.
+Pick it deliberately rather than by default.
+
+The default model is loaded before the service reports ready; the others are
+lazy-loaded on first use and cached afterwards.
 
 **To select a model via API:**
 ```python
 transcript = client.audio.transcriptions.create(
-  model="grikdotnet/parakeet-tdt-0.6b-fp16",  # Select FP16 model
+  model="parakeet-v3-fp16",  # Select the FP16 variant
   file=audio_file,
   response_format="text"
 )
 ```
+
+### Response formats
+
+`response_format` accepts `json` (default), `text`, `srt`, `vtt` and
+`verbose_json`. `verbose_json` returns segments, and word timestamps as well
+when `timestamp_granularities[]=word` is sent.
+
+### Batch transcription
+
+`POST /v1/audio/transcriptions/batch` takes several `files=` parts in one
+request and returns `{"results": [{"filename", "text", "duration"}, ...],
+"batch_size": N}`. It shares the model form field with the single-file
+endpoint. Requests are bounded by `PARAKEET_MAX_BATCH_FILES` (16) and
+`PARAKEET_MAX_BATCH_BYTES` (512 MiB); see the env knob table in
+[OPTIMIZATION.md](OPTIMIZATION.md#env-knobs) for the per-request limits that
+apply to both endpoints.
 
 ### Interactive API docs
 
@@ -274,7 +306,7 @@ Flask service and was never served by `server.py`.
     - Set **STT Engine** to `OpenAI`
     - Set **OpenAI Base URL** to `http://127.0.0.1:5092/v1`
     - Set **OpenAI API Key** to `sk-no-key-required`
-    - Set **STT Model** to `parakeet-tdt-0.6b-v3`
+    - Set **STT Model** to `parakeet-v3-fp32` (or leave it as the server default)
     - Click **Save**
 
 3.  **Start Using Voice!**
@@ -285,7 +317,7 @@ Flask service and was never served by `server.py`.
 
 ## Model details
 
-When running the application, the ONNX models are automatically loaded from the `models/` directory. The primary model used is the **Parakeet TDT 0.6B v3** converted to ONNX with INT8 quantization, providing the optimal balance of speed and accuracy for multilingual speech recognition across 25 European languages.
+When running the application, the ONNX models are downloaded and cached under the `models/` directory (`PARAKEET_MODELS_DIR`). The models served are **Parakeet TDT 0.6B v3** converted to ONNX at FP32, FP16 and INT8, plus the English-only v2 equivalents. The v3 variants cover 25 European languages; which one is used by default is described under [Model Selection](#model-selection).
 
 ## 🙏 Acknowledgments
 

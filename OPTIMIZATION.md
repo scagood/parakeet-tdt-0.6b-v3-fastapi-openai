@@ -176,14 +176,16 @@ All optional. Defaults are tuned for an 8-core CPU.
 |----------------------------|--------------|----------------------------------------------------------|
 | `PARAKEET_HOST`            | `0.0.0.0`    | bind host                                                |
 | `PARAKEET_PORT`            | `5092`       | bind port (matches the legacy service)                   |
-| `PARAKEET_DEFAULT_MODEL`   | `istupakov/parakeet-tdt-0.6b-v3-onnx` | default OpenAI model when form field is omitted |
+| `PARAKEET_MODELS_DIR`      | `./models`   | Hugging Face cache directory for the ONNX weights        |
+| `PARAKEET_DEFAULT_MODEL`   | `parakeet-v3-fp16` on GPU, `parakeet-v3-fp32` on CPU | default model when the form field is omitted; overrides the GPU/CPU choice |
 | `PARAKEET_INFER_WORKERS`   | `min(4, logical CPUs ÷ intra-op threads)` | parallel ORT workers in `InferencePool` when `PARAKEET_BATCHED=0`; logical CPUs are clamped to the cgroup quota |
-| `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU INT8 |
+| `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU      |
 | `PARAKEET_USE_GPU`         | `true`       | `true` / `auto` / `false`                                |
 | `PARAKEET_GPU_DEVICE_ID`   | `0`          | CUDA device for ORT                                      |
 | `PARAKEET_CHUNK_TARGET_SEC`| `60`         | preferred chunk length                                   |
 | `PARAKEET_CHUNK_MAX_SEC`   | `75`         | hard cap before force-cut; ≤ this skips chunking         |
 | `PARAKEET_CHUNK_MIN_SEC`   | `20`         | min chunk length before merge                            |
+| `PARAKEET_CHUNK_TRIM_SILENCE_SEC` | `3`   | silence gaps at least this long are cut out of a chunk   |
 | `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
 | `PARAKEET_VAD_MIN_SILENCE_MS` | `400`     | min silence between chunks                               |
 | `PARAKEET_VAD_SPEECH_PAD_MS` | `120`      | pad around speech segments                               |
@@ -196,6 +198,18 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_WARMUP`          | `true`       | run one synthetic inference before reporting ready       |
 | `PARAKEET_WARMUP_SEC`      | `5`          | warm-up audio length; `0` disables                       |
 | `PARAKEET_WARMUP_TIMEOUT_SEC` | `120`     | warm-up bound; a failed or timed-out warm-up fails startup |
+| `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
+| `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
+
+Request limits, all rejected with `413`:
+
+| Variable                   | Default      | Meaning                                                  |
+|----------------------------|--------------|----------------------------------------------------------|
+| `PARAKEET_MAX_UPLOAD_BYTES`| `268435456` (256 MiB) | max size of a single uploaded file             |
+| `PARAKEET_MAX_AUDIO_SECONDS` | `7200` (2 h) | max decoded duration of a single file                  |
+| `PARAKEET_MAX_REQUEST_CHUNKS` | `512`     | max chunks one request may produce after VAD chunking    |
+| `PARAKEET_MAX_BATCH_FILES` | `16`         | max files in one `/v1/audio/transcriptions/batch` call   |
+| `PARAKEET_MAX_BATCH_BYTES` | `536870912` (512 MiB) | max total bytes in one batch call              |
 
 ### Container CPU limits
 
