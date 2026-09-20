@@ -35,7 +35,6 @@ docker run -d --name parakeet-gpu -p 5092:5092 --gpus all \
 
 | Endpoint | Description |
 |----------|-------------|
-| `http://localhost:5092` | Web UI |
 | `http://localhost:5092/health` | Health check |
 | `http://localhost:5092/v1/audio/transcriptions` | OpenAI-compatible API |
 | `http://localhost:5092/docs` | Swagger documentation |
