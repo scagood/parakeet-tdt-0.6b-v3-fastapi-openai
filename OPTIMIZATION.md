@@ -130,7 +130,6 @@ changing code" and "identify bottlenecks with evidence":
 
 ```
 parakeet-tdt-0.6b-v3-fastapi-openai/
-├── app.py                       # Legacy Flask service (kept for reference)
 ├── server.py                    # New uvicorn entry point (port 5092)
 ├── pin_pcores.sh                # Optional P-core taskset wrapper
 └── parakeet_service/

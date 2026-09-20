@@ -42,9 +42,6 @@ RUN if pip list --format=freeze | grep '^nvidia-'; then \
 
 COPY server.py .
 COPY parakeet_service/ parakeet_service/
-COPY app.py .
-COPY templates/ templates/
-COPY parakeet.png .
 
 RUN mkdir -p temp_uploads models && \
     chown -R parakeet:parakeet /app

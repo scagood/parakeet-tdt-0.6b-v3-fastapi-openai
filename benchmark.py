@@ -95,7 +95,7 @@ def find_service_pid() -> int:
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             cmdline = proc.info["cmdline"]
-            if cmdline and "app.py" in " ".join(cmdline):
+            if cmdline and "server.py" in " ".join(cmdline):
                 return proc.info["pid"]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
