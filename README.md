@@ -205,6 +205,8 @@ python server.py
 ### Client Example (Python)
 
 You can use the standard `openai` Python library to interact with the server.
+It is a client dependency, not a server one, so install it separately with
+`pip install openai`.
 
 ```python
 from openai import OpenAI
