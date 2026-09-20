@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.0.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.5.0...v2.0.0) (2026-09-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* Python 3.14 is now the minimum supported interpreter, and the legacy Flask service (`app.py`) and its browser upload page at `/` are removed. The OpenAI-compatible API under `parakeet_service/` is unchanged.
+
+### 🌟 Features
+
+* **audio:** decode stereo and 24-bit WAVs in process ([#22](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/22)) ([35d843c](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/35d843c872fdd01d14fe13a10113067826117d23)), closes [#15](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/15)
+* require Python 3.14 and drop the legacy Flask service ([#11](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/11)) ([250dfeb](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/250dfeb8c55e6401fdb54163915a83b3f9182638))
+
+
+### 📚 Documentation
+
+* correct the model names, defaults and missing endpoints ([#21](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/21)) ([c90be47](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/c90be47db0066449f568bfe89a142a978923fe4e)), closes [#16](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/16)
+
+
+### 📦 Dependencies
+
+* **pkg:** drop the unused openai and typing_extensions pins ([#18](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/18)) ([0e25b2c](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/0e25b2c192a4806bae5d845ab0d20ce3d5e0a3a9)), closes [#12](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/12)
+
+
+### 🧹 Chores
+
+* delete the three unreferenced root diagnostic scripts ([#19](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/19)) ([e2ee3c0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/e2ee3c01b98f82bff1345acb9cca0baa28502efb)), closes [#13](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/13)
+* remove the unreferenced parakeet.png ([#20](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/20)) ([48df6f3](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/commit/48df6f3b713d487236399309aea9d27c2fb3adab)), closes [#14](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/14)
+
 ## [1.5.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.4.0...v1.5.0) (2026-09-17)
 
 
