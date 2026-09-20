@@ -1,10 +1,6 @@
 """In-memory audio decoding and resampling."""
 from __future__ import annotations
 
-try:
-    import audioop  # removed from the stdlib in Python 3.13 (PEP 594)
-except ImportError:
-    audioop = None  # type: ignore[assignment]
 import subprocess
 import wave
 from io import BytesIO
@@ -19,64 +15,60 @@ import numpy as np
 def _wav_info(data: bytes) -> Optional[dict]:
     try:
         with wave.open(BytesIO(data), "rb") as wav_file:
-            sample_rate = wav_file.getframerate()
             return {
-                "frames": wav_file.getnframes(),
-                "sample_rate": sample_rate,
+                "sample_rate": wav_file.getframerate(),
                 "channels": wav_file.getnchannels(),
                 "sample_width": wav_file.getsampwidth(),
                 "compression": wav_file.getcomptype(),
-                "duration": wav_file.getnframes() / sample_rate if sample_rate else 0.0,
             }
     except (wave.Error, EOFError, OSError):
         return None
 
 
+_PCM_DTYPES = {2: "<i2", 4: "<i4"}
+
+
+def _pcm_to_float(pcm: bytes, sample_width: int) -> np.ndarray:
+    """Convert interleaved little-endian PCM to float32 in [-1, 1)."""
+    if sample_width == 1:  # 8-bit WAV is unsigned; everything wider is signed
+        return (np.frombuffer(pcm, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    if sample_width == 3:
+        # numpy has no 24-bit dtype: copy each sample into the top three bytes
+        # of an int32, which sign-extends it and scales it by 256 for free.
+        raw = np.frombuffer(pcm, dtype=np.uint8)
+        usable = raw.size - raw.size % 3
+        packed = np.zeros((usable // 3, 4), dtype=np.uint8)
+        packed[:, 1:] = raw[:usable].reshape(-1, 3)
+        return packed.view("<i4").ravel().astype(np.float32) / 2147483648.0
+    count = len(pcm) // sample_width
+    samples = np.frombuffer(pcm, dtype=_PCM_DTYPES[sample_width], count=count)
+    return samples.astype(np.float32) / float(1 << (8 * sample_width - 1))
+
+
 def _decode_pcm_wav(data: bytes, info: dict) -> Optional[np.ndarray]:
-    if info["compression"] != "NONE":
+    """Decode an uncompressed 16 kHz PCM WAV without leaving the process.
+
+    Returns None for anything needing a sample-rate conversion, which
+    `_ffmpeg_decode` does faster than numpy can. See OPTIMIZATION.md.
+    """
+    if info["compression"] != "NONE" or info["sample_rate"] != TARGET_SR:
         return None
     sample_width = info["sample_width"]
     channels = info["channels"]
-    if sample_width not in (1, 2, 3, 4) or channels not in (1, 2):
+    if sample_width not in (1, 2, 3, 4):
         return None
-    needs_audioop = (
-        channels == 2 or info["sample_rate"] != TARGET_SR or sample_width == 3
-    )
-    if audioop is None and needs_audioop:
-        return None  # the ffmpeg fallback handles conversion
+    if channels not in (1, 2):
+        return None  # ffmpeg downmixes 5.1 and up with per-channel weights
     try:
         with wave.open(BytesIO(data), "rb") as wav_file:
             pcm = wav_file.readframes(wav_file.getnframes())
-        if channels == 2:
-            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
-            channels = 1
-        if info["sample_rate"] != TARGET_SR:
-            pcm, _ = audioop.ratecv(
-                pcm,
-                sample_width,
-                channels,
-                info["sample_rate"],
-                TARGET_SR,
-                None,
-            )
-        if sample_width == 1:
-            result = (
-                np.frombuffer(pcm, dtype=np.uint8).astype(np.float32) - 128.0
-            ) / 128.0
-        elif sample_width == 2:
-            result = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-        elif sample_width == 4:
-            result = (
-                np.frombuffer(pcm, dtype="<i4").astype(np.float32) / 2147483648.0
-            )
-        else:
-            pcm16 = audioop.lin2lin(pcm, sample_width, 2)
-            result = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
-        return np.ascontiguousarray(result, dtype=np.float32)
-    except (wave.Error, EOFError, OSError, ValueError) + (
-        (audioop.error,) if audioop is not None else ()
-    ):
+        samples = _pcm_to_float(pcm, sample_width)
+    except (wave.Error, EOFError, OSError, ValueError):
         return None
+    if channels == 2:
+        usable = samples.size - samples.size % 2
+        samples = samples[:usable].reshape(-1, 2).mean(axis=1, dtype=np.float32)
+    return np.ascontiguousarray(samples, dtype=np.float32)
 
 
 def _ffmpeg_decode(data: bytes) -> np.ndarray:
