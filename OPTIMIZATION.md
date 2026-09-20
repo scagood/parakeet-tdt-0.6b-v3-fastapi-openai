@@ -79,8 +79,8 @@ changing code" and "identify bottlenecks with evidence":
 
 - **In-process audio decode** (`parakeet_service/audio.py`): single
   `ffmpeg -i pipe:0 -ac 1 -ar 16000 -f s16le pipe:1` for non-WAV inputs,
-  and stdlib `wave`+`audioop` for WAVs. Removes per-chunk subprocess
-  fork/exec.
+  and stdlib `wave` + numpy for WAVs already at 16 kHz. Removes per-chunk
+  subprocess fork/exec.
 - **Silero-VAD auto-chunking** (`parakeet_service/chunker.py`): pack speech
   segments into 60 s targets, cutting on pause midpoints, with min/max
   guards. Falls back to energy-RMS when silero-vad is unavailable.
@@ -119,6 +119,24 @@ changing code" and "identify bottlenecks with evidence":
   39.3× to 33.4×. Restricting affinity also blocks ORT's lightweight
   ops and audio I/O from spilling onto the 4 E-cores. Kept the script
   available for users who want predictability but it is not the default.
+- **Resampling WAVs in numpy** (`audio.py`): the in-process path only
+  covers 16 kHz input, so every 44.1/48 kHz upload pays an ffmpeg
+  fork/exec. Tried replacing that with a polyphase windowed-sinc
+  resampler in numpy. It is correct — 47 dB SNR against `swr` — but
+  slower than the subprocess it replaces on anything but very short
+  clips: 60 s of 44.1 kHz stereo took 627 ms against ffmpeg's 213 ms,
+  and 300 s took 3.6 s against 892 ms. A plain `np.interp` resample does
+  beat ffmpeg (75 ms on that 60 s file) but aliases badly, 21-24 dB SNR,
+  which is not a trade worth making in front of an ASR model. What did
+  hold up is the conversion work either side of resampling: downmixing
+  and integer-width conversion in numpy beat ffmpeg at every size tested
+  — 2.9x on 300 s of 16 kHz stereo, 5.6x on 300 s of 24-bit mono, and
+  38-580x on 5 s clips, where ffmpeg's ~55 ms fork/exec dominates — and
+  match its output to within one int16 LSB. So `_decode_pcm_wav` takes
+  mono and stereo at any PCM sample width when the file is already at
+  16 kHz, and hands everything else to ffmpeg. Measured on a 4-core
+  Xeon 2.10 GHz with ffmpeg 6.1.1 and numpy 2.4.6, not the 8-core box
+  the RTFx numbers above come from.
 - **INT8 on CUDA**: the default CPU INT8 model is a poor CUDA target. It
   bound to CUDA after preload, but measured only about 8.6× RTFx on the
   300 s file and 8.7× concurrent throughput. Use it on CPU, not GPU.
