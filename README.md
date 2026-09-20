@@ -163,7 +163,7 @@ The easiest way to get started. No dependencies to install!
 
 **CPU Deployment:**
 ```bash
-git clone https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
+git clone https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai
 cd parakeet-tdt-0.6b-v3-fastapi-openai
 docker compose up parakeet-cpu -d
 ```
@@ -184,7 +184,7 @@ For development or customization:
 ```bash
 conda create -n parakeet-onnx python=3.14
 conda activate parakeet-onnx
-git clone https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
+git clone https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai
 cd parakeet-tdt-0.6b-v3-fastapi-openai
 pip install -r requirements.txt
 ```
