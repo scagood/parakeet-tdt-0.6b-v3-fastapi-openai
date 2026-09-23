@@ -194,6 +194,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_VRAM_BUDGET_MIB` | detected total VRAM | GPU memory a batch may fill; defaults to the whole card, set e.g. `8192` to cap at 8 GiB. The `BatchWorker` packs each batch up to this from the queued clips' estimated memory |
 | `PARAKEET_VRAM_RESERVE_MIB`| `3072`       | VRAM held back from the budget for the model weights + ORT's CUDA arena |
 | `PARAKEET_VRAM_PER_SEC_MIB`| `8.0` (auto-calibrated) | estimated activation MiB per second of audio; remeasured at warm-up unless set explicitly. Set to pin it and skip calibration |
+| `PARAKEET_CALIB_SECS`      | *(empty)*    | comma-separated clip lengths, e.g. `2,5,30,60,300`, for workloads with widely varying clip sizes. Warm-up runs one of each and fits a quadratic memory curve instead of a single linear slope. Empty keeps single-point calibration at `PARAKEET_WARMUP_SEC`. Adds ~their total duration to startup |
 | `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |
 | `PARAKEET_ORT_INTER_THREADS` | `1`        | ORT inter-op threads                                     |
 | `PARAKEET_AUDIO_WORKERS`   | `min(8, physical)` | audio decode/chunk worker pool                     |

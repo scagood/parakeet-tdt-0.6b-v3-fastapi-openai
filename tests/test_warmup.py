@@ -58,6 +58,21 @@ async def test_warmup_submits_the_default_model():
 
 
 @pytest.mark.asyncio
+async def test_warmup_runs_each_calibration_duration(monkeypatch):
+    monkeypatch.setattr(main, "CALIB_SECS", [30.0, 2.0, 5.0])
+    seen = []
+
+    async def submit(wav, _model_name):
+        seen.append(round(wav.size / TARGET_SR))
+        return "ok"
+
+    await main._warmup(_app_with_worker(submit))
+
+    # Runs every requested length, ascending (arena grows monotonically).
+    assert seen == [2, 5, 30]
+
+
+@pytest.mark.asyncio
 async def test_warmup_propagates_inference_errors():
     async def submit(_wav, _model_name):
         raise RuntimeError("model exploded")
@@ -176,31 +191,51 @@ def _batch_worker(per_sec_mib):
     )
 
 
-def test_calibration_converts_vram_delta_to_per_second(monkeypatch):
-    monkeypatch.setattr(main, "WARMUP_SEC", 5.0)
-    monkeypatch.setattr(main, "query_gpu_mib", lambda _field, *a, **k: 1050)
+def test_fit_cost_single_point_is_linear_through_origin():
+    # One (5s, 50MiB) sample => 10 MiB/s, no quadratic term.
+    coeffs = main._fit_cost([(5.0, 50)])
+    assert list(coeffs) == pytest.approx([0.0, 10.0, 0.0])
+
+
+def test_fit_cost_recovers_a_quadratic_curve():
+    # Samples drawn from cost(sec) = 0.5*sec^2 + 2*sec.
+    pts = [(s, int(0.5 * s * s + 2 * s)) for s in (2, 5, 30, 60, 300)]
+    coeffs = main._fit_cost(pts)
+    assert coeffs[0] == pytest.approx(0.5, abs=0.05)  # quadratic term
+    assert coeffs[1] == pytest.approx(2.0, abs=1.0)  # linear term
+
+
+def test_fit_cost_drops_nonpositive_samples():
+    # A negative delta (another process freed VRAM) is discarded; the two good
+    # points still fit a line.
+    coeffs = main._fit_cost([(2.0, -100), (5.0, 50), (30.0, 300)])
+    assert coeffs is not None
+    assert main_np_polyval(coeffs, 5.0) == pytest.approx(50, abs=5)
+
+
+def test_fit_cost_returns_none_without_usable_samples():
+    assert main._fit_cost([(2.0, -5), (5.0, 0)]) is None
+
+
+def test_apply_calibration_hands_curve_to_worker():
     worker = _batch_worker(per_sec_mib=8.0)
-    # 1050 - 1000 = 50 MiB over 5s => 10 MiB/s.
-    main._calibrate_batch_memory(worker, before_mib=1000)
-    assert worker._per_sec_mib == pytest.approx(10.0)
+    main._apply_calibration(worker, [(5.0, 50), (30.0, 300), (300.0, 45000)])
+    # Estimate now follows the fitted curve, not the 8 MiB/s default.
+    est_300 = worker._est_mib(np.zeros(300 * TARGET_SR, dtype=np.float32))
+    assert est_300 == pytest.approx(45000, rel=0.1)
 
 
-def test_calibration_ignores_implausible_delta(monkeypatch):
-    monkeypatch.setattr(main, "WARMUP_SEC", 5.0)
-    # Another process freed memory during warm-up: delta is negative.
-    monkeypatch.setattr(main, "query_gpu_mib", lambda _field, *a, **k: 900)
+def test_apply_calibration_noop_on_bad_samples():
     worker = _batch_worker(per_sec_mib=8.0)
-    main._calibrate_batch_memory(worker, before_mib=1000)
-    assert worker._per_sec_mib == pytest.approx(8.0)
+    main._apply_calibration(worker, [(5.0, -10)])
+    # Kept the default: 1s clip is 8 MiB.
+    assert worker._est_mib(np.zeros(TARGET_SR, dtype=np.float32)) == pytest.approx(8.0)
 
 
-def test_calibration_noop_without_a_baseline(monkeypatch):
-    called = []
-    monkeypatch.setattr(main, "query_gpu_mib", lambda *a, **k: called.append(1))
-    worker = _batch_worker(per_sec_mib=8.0)
-    main._calibrate_batch_memory(worker, before_mib=None)
-    assert worker._per_sec_mib == pytest.approx(8.0)
-    assert called == []  # no "after" reading when there was no baseline
+def main_np_polyval(coeffs, x):
+    import numpy as np
+
+    return float(np.polyval(coeffs, x))
 
 
 def test_warmup_input_matches_a_real_chunk():

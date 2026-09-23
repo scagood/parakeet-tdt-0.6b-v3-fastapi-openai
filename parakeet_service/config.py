@@ -233,6 +233,32 @@ VRAM_BUDGET_MIB = _env_int(
 )
 # Activation memory a single batch may fill (0 => memory-bound packing off).
 VRAM_ACTIVATION_MIB = max(0, VRAM_BUDGET_MIB - VRAM_RESERVE_MIB)
+
+
+def _env_float_list(name: str) -> list[float]:
+    raw = os.getenv(name)
+    if not raw:
+        return []
+    try:
+        values = [float(x) for x in raw.split(",") if x.strip()]
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be comma-separated numbers, got {raw!r}"
+        ) from exc
+    values = sorted(v for v in values if v > 0)
+    if not values:
+        raise RuntimeError(f"{name} must contain at least one positive duration")
+    return values
+
+
+# Multi-point calibration for workloads whose clip lengths vary widely (a linear
+# per-second estimate can't fit both 5s and 5min clips because attention is
+# ~O(seq^2)). List clip durations spanning your range, e.g. "2,5,30,60,300", and
+# warm-up runs one of each, measures the VRAM it consumed, and fits a quadratic
+# cost curve instead of a single slope. Empty (default) keeps the single-point
+# linear calibration at PARAKEET_WARMUP_SEC. The extra clips lengthen startup by
+# roughly their total audio duration.
+CALIB_SECS = _env_float_list("PARAKEET_CALIB_SECS")
 BATCH_WINDOW_MS = _env_float("PARAKEET_BATCH_WINDOW_MS", 4.0, minimum=0.0)
 
 # ONNX Runtime defers kernel selection and arena allocation to the first

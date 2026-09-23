@@ -94,7 +94,10 @@ class BatchWorker:
         self._get_model = get_model_fn
         self._max_batch = max(1, max_batch)
         self._budget_mib = max(0.0, budget_mib)
-        self._per_sec_mib = max(0.0, per_sec_mib)
+        # Per-clip memory estimate as a polynomial in clip seconds, highest
+        # degree first (numpy.polyval order). Defaults to purely linear
+        # (per_sec * seconds); calibration may replace it with a quadratic fit.
+        self._cost = np.array([0.0, max(0.0, per_sec_mib), 0.0])
         self._window_s = max(0.0, window_ms) / 1000.0
         self._queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._task: Optional[asyncio.Task[None]] = None
@@ -124,27 +127,36 @@ class BatchWorker:
         self._fail_queued(RuntimeError("batch worker stopped"))
         await asyncio.to_thread(_shutdown_executor, self._executor)
 
-    def recalibrate(self, per_sec_mib: float) -> None:
-        """Replace the memory-per-second estimate with a measured value."""
-        if per_sec_mib > 0:
-            self._per_sec_mib = per_sec_mib
+    def recalibrate(self, cost_coeffs) -> None:
+        """Replace the per-clip cost estimate with measured polynomial coeffs.
+
+        ``cost_coeffs`` is highest-degree-first (numpy.polyval order). A curve
+        that is all-zero is ignored, so a failed calibration keeps the default.
+        """
+        coeffs = np.asarray(cost_coeffs, dtype=float)
+        if coeffs.any():
+            self._cost = coeffs
 
     def describe(self, ref_seconds: float) -> str:
         """Effective batching config, with clips/batch implied at a reference
         clip length — for a single startup log line."""
-        if self._budget_mib and self._per_sec_mib > 0 and ref_seconds > 0:
-            per_clip = self._per_sec_mib * ref_seconds
+        per_clip = self._est_seconds(ref_seconds)
+        if self._budget_mib and per_clip > 0 and ref_seconds > 0:
             implied = max(1, min(self._max_batch, int(self._budget_mib // per_clip)))
-            fit = f"~{implied} clips/batch at {ref_seconds:.0f}s clips"
+            fit = f"~{implied} clips/batch at {ref_seconds:.0f}s"
         else:
             fit = f"count-capped at {self._max_batch}"
+        cost = ", ".join(f"{c:.3g}" for c in self._cost)
         return (
-            f"budget={self._budget_mib:.0f}MiB per_sec={self._per_sec_mib:.1f}MiB/s "
+            f"budget={self._budget_mib:.0f}MiB cost[hi..lo]=[{cost}] "
             f"max_batch={self._max_batch} ({fit})"
         )
 
+    def _est_seconds(self, seconds: float) -> float:
+        return max(0.0, float(np.polyval(self._cost, seconds)))
+
     def _est_mib(self, wav: np.ndarray) -> float:
-        return self._per_sec_mib * (wav.shape[0] / TARGET_SR)
+        return self._est_seconds(wav.shape[0] / TARGET_SR)
 
     def _new_job(self, wav: np.ndarray, model_name: str) -> _Job:
         if not self._accepting:

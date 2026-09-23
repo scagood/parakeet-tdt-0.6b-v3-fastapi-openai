@@ -125,7 +125,7 @@ def test_describe_reports_implied_clips_per_batch():
     # 1000 MiB budget, 10 MiB/s * 5s = 50 MiB/clip => 20 clips.
     text = worker.describe(5.0)
     assert "~20 clips/batch" in text
-    assert "budget=1000MiB" in text and "per_sec=10.0MiB/s" in text
+    assert "budget=1000MiB" in text and "cost[hi..lo]=[0, 10, 0]" in text
 
 
 def test_describe_falls_back_to_count_cap_without_budget():
@@ -133,6 +133,21 @@ def test_describe_falls_back_to_count_cap_without_budget():
         lambda _name: object(), max_batch=8, budget_mib=0.0, per_sec_mib=10.0
     )
     assert "count-capped at 8" in worker.describe(5.0)
+
+
+def test_recalibrate_applies_quadratic_curve():
+    worker = BatchWorker(lambda _name: object(), budget_mib=1000.0, per_sec_mib=8.0)
+    # cost(sec) = 2*sec^2 + 1*sec + 0
+    worker.recalibrate([2.0, 1.0, 0.0])
+    # 3s clip => 2*9 + 3 = 21 MiB
+    assert worker._est_mib(np.ones(3 * TARGET_SR, dtype=np.float32)) == pytest.approx(21.0)
+
+
+def test_recalibrate_ignores_zero_curve():
+    worker = BatchWorker(lambda _name: object(), budget_mib=1000.0, per_sec_mib=8.0)
+    worker.recalibrate([0.0, 0.0, 0.0])
+    # Unchanged: default linear 8 MiB/s => 1s clip is 8 MiB.
+    assert worker._est_mib(np.ones(TARGET_SR, dtype=np.float32)) == pytest.approx(8.0)
 
 
 @pytest.mark.asyncio
