@@ -10,8 +10,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .batchworker import build_worker
-from .config import AUDIO_WORKERS, WARMUP, WARMUP_SEC, WARMUP_TIMEOUT_SEC, logger
+from .batchworker import BatchWorker, build_worker
+from .config import (
+    AUDIO_WORKERS,
+    USE_GPU,
+    VRAM_PER_SEC_EXPLICIT,
+    WARMUP,
+    WARMUP_SEC,
+    WARMUP_TIMEOUT_SEC,
+    logger,
+    query_gpu_mib,
+)
 from .model import default_model_name, get_model, load_model, warmup_waveform
 from .routes import router
 
@@ -43,6 +52,7 @@ async def _warmup(app: FastAPI) -> None:
     orchestrator restarts it. ``PARAKEET_WARMUP_TIMEOUT_SEC`` bounds the wait.
     """
     started = time.perf_counter()
+    before_mib = _calibration_reading()
     try:
         await asyncio.wait_for(
             app.state.worker.submit(warmup_waveform(), default_model_name()),
@@ -58,6 +68,48 @@ async def _warmup(app: FastAPI) -> None:
     except Exception as exc:
         raise RuntimeError("warm-up inference failed") from exc
     logger.info("Warm-up completed in %.2fs", time.perf_counter() - started)
+    _calibrate_batch_memory(app.state.worker, before_mib)
+
+
+def _calibration_reading() -> int | None:
+    """Used-VRAM baseline, or None when calibration cannot/should not run."""
+    if USE_GPU == "false" or VRAM_PER_SEC_EXPLICIT or WARMUP_SEC <= 0:
+        return None
+    return query_gpu_mib("memory.used")
+
+
+def _calibrate_batch_memory(worker, before_mib: int | None) -> None:
+    """Turn the VRAM the warm-up clip consumed into a MiB-per-second estimate.
+
+    The warm-up runs one WARMUP_SEC clip through the real path, so the growth in
+    used VRAM across it is that clip's activation footprint. Dividing by its
+    duration gives the per-second coefficient the batcher uses to decide how many
+    clips fit the budget. The delta cancels the fixed weights/arena baseline and
+    any other process on the card, as long as that stays constant across warm-up.
+    """
+    if before_mib is None or not isinstance(worker, BatchWorker):
+        return
+    after_mib = query_gpu_mib("memory.used")
+    if after_mib is None:
+        return
+    per_sec = (after_mib - before_mib) / WARMUP_SEC
+    # A non-positive or absurd delta means another process moved the needle;
+    # keep the configured default rather than trust a bad reading.
+    if not 0.1 <= per_sec <= 1000.0:
+        logger.warning(
+            "Batch memory calibration skipped: warm-up VRAM delta %+dMiB over "
+            "%.1fs is implausible; using configured PARAKEET_VRAM_PER_SEC_MIB",
+            after_mib - before_mib,
+            WARMUP_SEC,
+        )
+        return
+    worker.recalibrate(per_sec)
+    logger.info(
+        "Calibrated batch memory to %.1f MiB/s (warm-up used %dMiB over %.1fs)",
+        per_sec,
+        after_mib - before_mib,
+        WARMUP_SEC,
+    )
 
 
 @asynccontextmanager
@@ -74,6 +126,10 @@ async def lifespan(app: FastAPI):
         await app.state.worker.start()
         if WARMUP and WARMUP_SEC > 0:
             await _warmup(app)
+        if isinstance(app.state.worker, BatchWorker):
+            logger.info(
+                "Batch memory config: %s", app.state.worker.describe(WARMUP_SEC)
+            )
         app.state.ready = True
         logger.info("Service ready")
         yield

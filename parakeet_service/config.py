@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable, Optional
@@ -177,7 +178,61 @@ VAD_SPEECH_PAD_MS = _env_int("PARAKEET_VAD_SPEECH_PAD_MS", 120, minimum=0)
 
 GPU_DEVICE_ID = _env_int("PARAKEET_GPU_DEVICE_ID", 0, minimum=0)
 BATCHED = _env_bool("PARAKEET_BATCHED", USE_GPU != "false")
-MAX_BATCH_SIZE = _env_int("PARAKEET_MAX_BATCH_SIZE", 4)
+
+
+def query_gpu_mib(field: str, device_id: int = GPU_DEVICE_ID) -> Optional[int]:
+    """A memory.* field of the CUDA device in MiB via nvidia-smi, or None.
+
+    Used for both the total-VRAM budget default and the used-VRAM readings that
+    calibrate the batch memory estimate at warm-up.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={device_id}",
+                f"--query-gpu={field}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.splitlines()
+        return int(out[0].strip())
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        return None
+
+
+# Memory-bound dynamic batching. The batch worker estimates each waiting clip's
+# activation memory from its duration and packs a batch until adding the next
+# clip would exceed the budget — so a batch uses as much VRAM as the queued clips
+# can fill, and no more.
+#
+# The budget defaults to the whole detected card ("use as much as possible");
+# cap it by setting PARAKEET_VRAM_BUDGET_MIB (e.g. 8192 for 8 GiB). A reserve is
+# held back for the shared model weights + ORT's CUDA arena, and the remainder is
+# what batches may fill. If total VRAM can't be read (no nvidia-smi) the budget is
+# 0, which disables memory-bound packing and leaves MAX_BATCH_SIZE as the limit.
+#
+# ponytail: the per-clip estimate is LINEAR in duration (PARAKEET_VRAM_PER_SEC_MIB),
+# but conformer attention is ~O(seq^2), so long clips are under-charged. The
+# coefficient defaults to a guess but is remeasured at warm-up (see main.py); set
+# PARAKEET_VRAM_PER_SEC_MIB explicitly to pin it and skip auto-calibration.
+# Because calibration reads one warm-up clip, warm up near your real chunk length
+# (PARAKEET_WARMUP_SEC) so the linear fit is accurate at your operating point.
+MAX_BATCH_SIZE = _env_int("PARAKEET_MAX_BATCH_SIZE", 32)
+VRAM_RESERVE_MIB = _env_int("PARAKEET_VRAM_RESERVE_MIB", 3072, minimum=0)
+VRAM_PER_SEC_MIB = _env_float("PARAKEET_VRAM_PER_SEC_MIB", 8.0, minimum=0.0)
+# Auto-calibration is skipped when the operator pins the coefficient by hand.
+VRAM_PER_SEC_EXPLICIT = os.getenv("PARAKEET_VRAM_PER_SEC_MIB") is not None
+
+_gpu_total_mib = query_gpu_mib("memory.total") if USE_GPU != "false" else None
+VRAM_BUDGET_MIB = _env_int(
+    "PARAKEET_VRAM_BUDGET_MIB", _gpu_total_mib or 0, minimum=0
+)
+# Activation memory a single batch may fill (0 => memory-bound packing off).
+VRAM_ACTIVATION_MIB = max(0, VRAM_BUDGET_MIB - VRAM_RESERVE_MIB)
 BATCH_WINDOW_MS = _env_float("PARAKEET_BATCH_WINDOW_MS", 4.0, minimum=0.0)
 
 # ONNX Runtime defers kernel selection and arena allocation to the first

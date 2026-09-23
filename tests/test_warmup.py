@@ -168,6 +168,41 @@ async def test_lifespan_fails_startup_when_warmup_fails(monkeypatch):
     assert app.state.ready is False
 
 
+def _batch_worker(per_sec_mib):
+    from parakeet_service.batchworker import BatchWorker
+
+    return BatchWorker(
+        lambda _name: object(), budget_mib=1000.0, per_sec_mib=per_sec_mib
+    )
+
+
+def test_calibration_converts_vram_delta_to_per_second(monkeypatch):
+    monkeypatch.setattr(main, "WARMUP_SEC", 5.0)
+    monkeypatch.setattr(main, "query_gpu_mib", lambda _field, *a, **k: 1050)
+    worker = _batch_worker(per_sec_mib=8.0)
+    # 1050 - 1000 = 50 MiB over 5s => 10 MiB/s.
+    main._calibrate_batch_memory(worker, before_mib=1000)
+    assert worker._per_sec_mib == pytest.approx(10.0)
+
+
+def test_calibration_ignores_implausible_delta(monkeypatch):
+    monkeypatch.setattr(main, "WARMUP_SEC", 5.0)
+    # Another process freed memory during warm-up: delta is negative.
+    monkeypatch.setattr(main, "query_gpu_mib", lambda _field, *a, **k: 900)
+    worker = _batch_worker(per_sec_mib=8.0)
+    main._calibrate_batch_memory(worker, before_mib=1000)
+    assert worker._per_sec_mib == pytest.approx(8.0)
+
+
+def test_calibration_noop_without_a_baseline(monkeypatch):
+    called = []
+    monkeypatch.setattr(main, "query_gpu_mib", lambda *a, **k: called.append(1))
+    worker = _batch_worker(per_sec_mib=8.0)
+    main._calibrate_batch_memory(worker, before_mib=None)
+    assert worker._per_sec_mib == pytest.approx(8.0)
+    assert called == []  # no "after" reading when there was no baseline
+
+
 def test_warmup_input_matches_a_real_chunk():
     """Closest available proxy for "the model will accept this".
 

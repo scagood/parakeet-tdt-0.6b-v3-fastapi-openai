@@ -12,6 +12,9 @@ from .config import (
     BATCH_WINDOW_MS,
     INFER_WORKERS,
     MAX_BATCH_SIZE,
+    TARGET_SR,
+    VRAM_ACTIVATION_MIB,
+    VRAM_PER_SEC_MIB,
     logger,
 )
 
@@ -85,9 +88,13 @@ class BatchWorker:
         *,
         max_batch: int = MAX_BATCH_SIZE,
         window_ms: float = BATCH_WINDOW_MS,
+        budget_mib: float = VRAM_ACTIVATION_MIB,
+        per_sec_mib: float = VRAM_PER_SEC_MIB,
     ):
         self._get_model = get_model_fn
         self._max_batch = max(1, max_batch)
+        self._budget_mib = max(0.0, budget_mib)
+        self._per_sec_mib = max(0.0, per_sec_mib)
         self._window_s = max(0.0, window_ms) / 1000.0
         self._queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._task: Optional[asyncio.Task[None]] = None
@@ -116,6 +123,28 @@ class BatchWorker:
                 pass
         self._fail_queued(RuntimeError("batch worker stopped"))
         await asyncio.to_thread(_shutdown_executor, self._executor)
+
+    def recalibrate(self, per_sec_mib: float) -> None:
+        """Replace the memory-per-second estimate with a measured value."""
+        if per_sec_mib > 0:
+            self._per_sec_mib = per_sec_mib
+
+    def describe(self, ref_seconds: float) -> str:
+        """Effective batching config, with clips/batch implied at a reference
+        clip length — for a single startup log line."""
+        if self._budget_mib and self._per_sec_mib > 0 and ref_seconds > 0:
+            per_clip = self._per_sec_mib * ref_seconds
+            implied = max(1, min(self._max_batch, int(self._budget_mib // per_clip)))
+            fit = f"~{implied} clips/batch at {ref_seconds:.0f}s clips"
+        else:
+            fit = f"count-capped at {self._max_batch}"
+        return (
+            f"budget={self._budget_mib:.0f}MiB per_sec={self._per_sec_mib:.1f}MiB/s "
+            f"max_batch={self._max_batch} ({fit})"
+        )
+
+    def _est_mib(self, wav: np.ndarray) -> float:
+        return self._per_sec_mib * (wav.shape[0] / TARGET_SR)
 
     def _new_job(self, wav: np.ndarray, model_name: str) -> _Job:
         if not self._accepting:
@@ -154,6 +183,7 @@ class BatchWorker:
                 first = carry if carry is not None else await self._queue.get()
                 carry = None
                 batch = [first]
+                used_mib = self._est_mib(first.wav)
                 deadline = time.monotonic() + self._window_s
 
                 while len(batch) < self._max_batch:
@@ -169,7 +199,18 @@ class BatchWorker:
                     if candidate.model_name != first.model_name:
                         carry = candidate
                         break
+                    # Memory-bound the batch: the candidate whose estimated VRAM
+                    # would overflow the budget starts the next batch instead.
+                    # The first clip is always kept, so a lone clip larger than
+                    # the whole budget still runs (and may OOM — that is a
+                    # mis-sized budget, not a stall).
+                    if self._budget_mib and (
+                        used_mib + self._est_mib(candidate.wav) > self._budget_mib
+                    ):
+                        carry = candidate
+                        break
                     batch.append(candidate)
+                    used_mib += self._est_mib(candidate.wav)
 
                 try:
                     results = await loop.run_in_executor(

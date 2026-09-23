@@ -11,7 +11,11 @@ services:
     environment:
       PARAKEET_USE_GPU: "true"
       PARAKEET_BATCHED: "1"
-      PARAKEET_MAX_BATCH_SIZE: "4"
+      # Batch size is memory-bound: the worker fills each batch up to the VRAM
+      # budget (whole card by default) from the queued clips. Cap it with
+      # PARAKEET_VRAM_BUDGET_MIB (e.g. "8192" for 8 GiB), or pin a fixed count
+      # with PARAKEET_MAX_BATCH_SIZE. Set PARAKEET_WARMUP_SEC near your chunk
+      # length so the startup memory calibration is accurate.
       PARAKEET_BATCH_WINDOW_MS: "4"
       PARAKEET_ORT_INTRA_THREADS: "1"
       PARAKEET_AUDIO_WORKERS: "8"
