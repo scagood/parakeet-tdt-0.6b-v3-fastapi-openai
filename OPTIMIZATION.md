@@ -189,14 +189,18 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
 | `PARAKEET_VAD_MIN_SILENCE_MS` | `400`     | min silence between chunks                               |
 | `PARAKEET_VAD_SPEECH_PAD_MS` | `120`      | pad around speech segments                               |
-| `PARAKEET_MAX_BATCH_SIZE`  | `4`          | max batch (only used when `PARAKEET_BATCHED=1`)          |
+| `PARAKEET_MAX_BATCH_SIZE`  | `32`         | hard cap on clips per batch (only used when `PARAKEET_BATCHED=1`); the VRAM budget is the usual limiter |
 | `PARAKEET_BATCH_WINDOW_MS` | `4`          | batch collection window                                  |
+| `PARAKEET_VRAM_BUDGET_MIB` | detected total VRAM | GPU memory a batch may fill; defaults to the whole card, set e.g. `8192` to cap at 8 GiB. The `BatchWorker` packs each batch up to this from the queued clips' estimated memory |
+| `PARAKEET_VRAM_RESERVE_MIB`| `3072`       | VRAM held back from the budget for the model weights + ORT's CUDA arena |
+| `PARAKEET_VRAM_PER_SEC_MIB`| `8.0` (auto-calibrated) | estimated activation MiB per second of audio; remeasured at warm-up unless set explicitly. Set to pin it and skip calibration |
+| `PARAKEET_CALIB_SECS`      | *(empty)*    | comma-separated clip lengths, e.g. `2,5,30,60,300`, for workloads with widely varying clip sizes. Warm-up runs one of each and fits a quadratic memory curve instead of a single linear slope. Empty keeps single-point calibration at `PARAKEET_WARMUP_SEC`. Adds ~their total duration to startup |
 | `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |
 | `PARAKEET_ORT_INTER_THREADS` | `1`        | ORT inter-op threads                                     |
 | `PARAKEET_AUDIO_WORKERS`   | `min(8, physical)` | audio decode/chunk worker pool                     |
 | `PARAKEET_HF_OFFLINE`      | `false`      | skip the Hugging Face revision check; needs a pre-seeded cache |
 | `PARAKEET_WARMUP`          | `true`       | run one synthetic inference before reporting ready       |
-| `PARAKEET_WARMUP_SEC`      | `5`          | warm-up audio length; `0` disables                       |
+| `PARAKEET_WARMUP_SEC`      | `5`          | warm-up audio length; `0` disables. Also the clip length used to calibrate `PARAKEET_VRAM_PER_SEC_MIB`, so set it near your real chunk length for an accurate memory estimate |
 | `PARAKEET_WARMUP_TIMEOUT_SEC` | `120`     | warm-up bound; a failed or timed-out warm-up fails startup |
 | `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
 | `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
