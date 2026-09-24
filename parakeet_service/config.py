@@ -122,7 +122,18 @@ MODEL_CONFIGS = {
         "quantization": "fp16",
         "description": "FP16 GPU profile (English-only v2)",
     },
+    # ponytail: sketch. onnx_asr loads Whisper too, so enabling it is one entry
+    # here plus the whisper-family handling in model.py/routes.py/chunker.py.
+    # Unverified against a live onnx_asr: batched .recognize() over a list, and
+    # whether .with_timestamps() yields usable token times (see model.py).
+    "whisper-base": {
+        "hf_id": "whisper-base",  # onnx_asr preset; downloads the ONNX export
+        "quantization": None,
+        "description": "Whisper base (multilingual) — sketch",
+        "family": "whisper",
+    },
 }
+# Entries without an explicit "family" are Parakeet TDT; read via config.get.
 # Former API names, kept working. Keys are lowercase; lookups are normalized.
 MODEL_ALIASES = {
     "parakeet-v3": "parakeet-v3-fp32",
@@ -132,6 +143,8 @@ MODEL_ALIASES = {
     "parakeet-v2": "parakeet-v2-fp32",
     "parakeet-tdt-0.6b-v2": "parakeet-v2-int8",
     "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
+    # OpenAI clients hard-code model="whisper-1"; map it so they work unchanged.
+    "whisper-1": "whisper-base",
 }
 # FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so
 # CPU deployments default to FP32. int8 measurably drops words after silences.
@@ -163,6 +176,13 @@ if not CHUNK_MIN_SEC <= CHUNK_TARGET_SEC <= CHUNK_MAX_SEC:
         "chunk durations must satisfy PARAKEET_CHUNK_MIN_SEC <= "
         "PARAKEET_CHUNK_TARGET_SEC <= PARAKEET_CHUNK_MAX_SEC"
     )
+
+# Whisper's encoder consumes a fixed 30 s mel window; audio past 30 s in a
+# single input is silently dropped by the ONNX export. Parakeet has no such
+# limit (hence the 60/75 s defaults above), so whisper-family models must be
+# chunked tighter or every long chunk loses its tail without any error.
+WHISPER_CHUNK_MAX_SEC = 30.0
+WHISPER_CHUNK_TARGET_SEC = 25.0
 
 # Silence gaps at least this long are cut out of chunks instead of being fed
 # to the model; long in-chunk silence measurably degrades recognition of the

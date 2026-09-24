@@ -51,6 +51,22 @@ def test_models_endpoint_retrieve_resolves_aliases():
     assert err.value.status_code == 404
 
 
+def test_whisper_registered_and_card_is_not_parakeet():
+    assert "whisper-base" in MODEL_CONFIGS
+    assert _validate_model("whisper-1") == "whisper-base"  # OpenAI-client alias
+    assert _validate_model("WHISPER-1") == "whisper-base"
+    card = routes.retrieve_model("whisper-base")
+    assert card["owned_by"] == "openai"
+    assert card["language"] == ["auto"]  # not the Parakeet language list
+
+
+def test_chunk_bounds_are_tighter_for_whisper():
+    p_target, p_max, _ = routes._chunk_bounds("parakeet")
+    w_target, w_max, _ = routes._chunk_bounds("whisper")
+    assert w_max <= 30.0 < p_max
+    assert w_target < p_target
+
+
 def test_explicit_default_skips_probe(monkeypatch):
     from parakeet_service import model as m
 

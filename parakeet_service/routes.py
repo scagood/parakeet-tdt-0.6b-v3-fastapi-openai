@@ -17,6 +17,9 @@ from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
     ALIGN_WORDS,
+    CHUNK_MAX_SEC,
+    CHUNK_MIN_SEC,
+    CHUNK_TARGET_SEC,
     CPU_INFO,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
@@ -28,6 +31,8 @@ from .config import (
     SPOKEN_NUMBERS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
+    WHISPER_CHUNK_MAX_SEC,
+    WHISPER_CHUNK_TARGET_SEC,
     logger,
 )
 from .model import default_model_name, loaded_models
@@ -140,6 +145,25 @@ def _validate_model(model: Optional[str]) -> str:
     return normalized
 
 
+def _family(model_name: str) -> str:
+    return MODEL_CONFIGS[model_name].get("family", "parakeet")
+
+
+def _chunk_bounds(family: str) -> Tuple[float, float, float]:
+    """(target, max, min) seconds for chunking, per model family.
+
+    Whisper's encoder only sees 30 s per input, so it is chunked tighter than
+    Parakeet; otherwise every chunk past 30 s loses its tail silently.
+    """
+    if family == "whisper":
+        return (
+            WHISPER_CHUNK_TARGET_SEC,
+            WHISPER_CHUNK_MAX_SEC,
+            min(CHUNK_MIN_SEC, WHISPER_CHUNK_TARGET_SEC),
+        )
+    return CHUNK_TARGET_SEC, CHUNK_MAX_SEC, CHUNK_MIN_SEC
+
+
 def _validate_format(response_format: str) -> str:
     normalized = (response_format or "json").strip().lower()
     if normalized not in _ALLOWED_FORMATS:
@@ -180,7 +204,12 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
     return bytes(payload)
 
 
-def _prepare_audio(raw: bytes) -> _PreparedAudio:
+def _prepare_audio(
+    raw: bytes,
+    target_sec: float = CHUNK_TARGET_SEC,
+    max_sec: float = CHUNK_MAX_SEC,
+    min_sec: float = CHUNK_MIN_SEC,
+) -> _PreparedAudio:
     waveform = load_audio(raw)
     duration = float(waveform.size) / TARGET_SR
     if duration <= 0:
@@ -189,7 +218,7 @@ def _prepare_audio(raw: bytes) -> _PreparedAudio:
         raise _AudioTooLong(
             f"audio duration {duration:.1f}s exceeds limit {MAX_AUDIO_SECONDS:.1f}s"
         )
-    ranges = auto_chunk(waveform)
+    ranges = auto_chunk(waveform, target_sec=target_sec, max_sec=max_sec, min_sec=min_sec)
     pieces = slice_chunks(waveform, ranges)
     if len(pieces) > MAX_REQUEST_CHUNKS:
         raise _AudioTooLong(
@@ -203,11 +232,22 @@ def _prepare_audio(raw: bytes) -> _PreparedAudio:
     )
 
 
-async def _prepare_in_pool(request: Request, raw: bytes) -> _PreparedAudio:
+async def _prepare_in_pool(
+    request: Request,
+    raw: bytes,
+    target_sec: float,
+    max_sec: float,
+    min_sec: float,
+) -> _PreparedAudio:
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(
-            request.app.state.audio_pool, _prepare_audio, raw
+            request.app.state.audio_pool,
+            _prepare_audio,
+            raw,
+            target_sec,
+            max_sec,
+            min_sec,
         )
     except _AudioTooLong as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
@@ -554,12 +594,18 @@ _MODEL_CREATED = 1785888000  # catalog introduction (2026-08-05), fixed for stab
 
 def _model_card(name: str) -> Dict[str, Any]:
     hf_id = MODEL_CONFIGS[name]["hf_id"]
+    if _family(name) == "whisper":
+        owned_by = "openai"
+        language = ["auto"]  # multilingual; onnx_asr auto-detects, no selection exposed
+    else:
+        owned_by = hf_id.split("/")[0] if "/" in hf_id else "istupakov"
+        language = ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES
     return {
         "id": name,
         "object": "model",
         "created": _MODEL_CREATED,
-        "owned_by": hf_id.split("/")[0] if "/" in hf_id else "istupakov",
-        "language": ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES,
+        "owned_by": owned_by,
+        "language": language,
         "task": "automatic-speech-recognition",
         "aliases": sorted(a for a, t in MODEL_ALIASES.items() if t == name),
     }
@@ -629,17 +675,26 @@ async def transcribe(
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
+    family = _family(model_name)
+    target_sec, max_sec, min_sec = _chunk_bounds(family)
     output_format = _validate_format(response_format)
     granularities = set(timestamp_granularities or []) | set(
         timestamp_granularities_plain or []
     )
-    want_words = output_format == "verbose_json" and "word" in granularities
+    # Word timestamps come from Parakeet's TDT token path; Whisper returns text
+    # only (verified, onnx_asr 0.12.0), so don't run the aligner or surface word
+    # spans for it — forced alignment of the transcript would add them (#26).
+    want_words = (
+        output_format == "verbose_json"
+        and "word" in granularities
+        and family == "parakeet"
+    )
     align = ALIGN_WORDS if align_words is None else align_words
     speak = _speaks(spoken_numbers, language)
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
-    prepared = await _prepare_in_pool(request, raw)
+    prepared = await _prepare_in_pool(request, raw, target_sec, max_sec, min_sec)
     decode_ms = (time.perf_counter() - started) * 1000
 
     infer_started = time.perf_counter()
@@ -718,6 +773,7 @@ async def transcribe_batch(
             detail=f"Batch contains {len(files)} files; limit is {MAX_BATCH_FILES}",
         )
     model_name = _validate_model(model)
+    target_sec, max_sec, min_sec = _chunk_bounds(_family(model_name))
     filenames = [upload.filename or "unnamed" for upload in files]
 
     raws: List[bytes] = []
@@ -734,7 +790,14 @@ async def transcribe_batch(
 
     loop = asyncio.get_running_loop()
     futures = [
-        loop.run_in_executor(request.app.state.audio_pool, _prepare_audio, raw)
+        loop.run_in_executor(
+            request.app.state.audio_pool,
+            _prepare_audio,
+            raw,
+            target_sec,
+            max_sec,
+            min_sec,
+        )
         for raw in raws
     ]
     prepared_or_errors = await asyncio.gather(*futures, return_exceptions=True)
