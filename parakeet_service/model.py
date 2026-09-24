@@ -195,7 +195,12 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
             providers=providers,
             sess_options=session_options,
         )
-        if with_timestamps:
+        # ponytail: TDT-only for now. .with_timestamps() and the token/timestamp
+        # shape _stitch consumes are Parakeet-specific; onnx_asr's Whisper output
+        # is unverified here. Whisper loads plain → text + coarse (chunk-span)
+        # segment times, no word timestamps. Wire a whisper timestamp path when
+        # its .recognize() output is confirmed.
+        if with_timestamps and config.get("family", "parakeet") == "parakeet":
             model = model.with_timestamps()
         _validate_gpu_binding(normalized, model)
         _MODELS[key] = model
