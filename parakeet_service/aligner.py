@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 import onnxruntime as ort
 
+from . import spoken
 from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, ALIGN_WORDS, TARGET_SR, logger
 from .model import _build_sess_options
 
@@ -25,174 +26,31 @@ Span = tuple[float, float]
 
 # --------------------------------------------------------------------------- #
 # English text -> the characters wav2vec2-base-960h was trained on (A-Z, ').
-# Parakeet writes numbers and symbols; the aligner needs them as spoken words.
+# Parakeet writes numbers and symbols; spoken.py says them out, then this maps
+# the result onto the model's alphabet.
 # --------------------------------------------------------------------------- #
-_ONES = (
-    "ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE THIRTEEN "
-    "FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN"
-).split()
-_TENS = "_ _ TWENTY THIRTY FORTY FIFTY SIXTY SEVENTY EIGHTY NINETY".split()
-_SCALES = ((10**12, "TRILLION"), (10**9, "BILLION"), (10**6, "MILLION"), (1000, "THOUSAND"))
-_SCALE_WORDS = {"HUNDRED", "THOUSAND", "MILLION", "BILLION", "TRILLION"}
-_ORDINALS = {
-    "ONE": "FIRST", "TWO": "SECOND", "THREE": "THIRD", "FIVE": "FIFTH",
-    "EIGHT": "EIGHTH", "NINE": "NINTH", "TWELVE": "TWELFTH",
-}
-_CURRENCIES = {"$": "DOLLAR", "£": "POUND", "€": "EURO"}
-_UNITS = {unit + plural for unit in _CURRENCIES.values() for plural in ("", "S")}
 _SYMBOLS = {"%": " PERCENT", "&": " AND ", "+": " PLUS ", "@": " AT "}
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
-# Unit abbreviations after a number, as (singular, plural) spoken words. What
-# matters for timing is the sound: "£25", "25 lb" and "25lb" are all "twenty
-# five pounds", and ASR often writes money as weight or the other way round.
-_POUNDS = ("POUND", "POUNDS")
-_KM_PER_HOUR = ("KILOMETER PER HOUR", "KILOMETERS PER HOUR")
-_UNIT_WORDS = {
-    "lb": _POUNDS, "lbs": _POUNDS,
-    "oz": ("OUNCE", "OUNCES"),
-    "kg": ("KILOGRAM", "KILOGRAMS"), "kgs": ("KILOGRAM", "KILOGRAMS"),
-    "km": ("KILOMETER", "KILOMETERS"),
-    "cm": ("CENTIMETER", "CENTIMETERS"),
-    "mm": ("MILLIMETER", "MILLIMETERS"),
-    "ml": ("MILLILITER", "MILLILITERS"),
-    "ft": ("FOOT", "FEET"),
-    "mph": ("MILE PER HOUR", "MILES PER HOUR"),
-    "kph": _KM_PER_HOUR, "km/h": _KM_PER_HOUR,
-    "hr": ("HOUR", "HOURS"), "hrs": ("HOUR", "HOURS"),
-    "min": ("MINUTE", "MINUTES"), "mins": ("MINUTE", "MINUTES"),
-    "°c": ("DEGREE CELSIUS", "DEGREES CELSIUS"),
-    "°f": ("DEGREE FAHRENHEIT", "DEGREES FAHRENHEIT"),
-    "°": ("DEGREE", "DEGREES"),
-}
-# Scale abbreviations only count after a currency: "$5m" is five million
-# dollars, but a bare "5m" could be metres, so it keeps its letter.
-_SCALE_ABBREVIATIONS = {"k": "THOUSAND", "m": "MILLION", "bn": "BILLION"}
-_SUFFIXES = "|".join(
-    re.escape(s) for s in sorted({*_UNIT_WORDS, *_SCALE_ABBREVIATIONS}, key=len, reverse=True)
-)
-# A leading minus counts only at the start of a word: "mid-2020s" is not negative.
-_NUMBER = re.compile(
-    r"(?:(?<!\w)(-))?([$£€])?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(st|nd|rd|th)?"
-    rf"(?:({_SUFFIXES})(?![a-z]))?",
-    re.IGNORECASE,
-)
-_TRAILING_PUNCTUATION = re.compile(r"[.,!?;:]+$")
 
 
-def _cardinal(n: int) -> str:
-    if n < 20:
-        return _ONES[n]
-    if n < 100:
-        return _TENS[n // 10] + ("" if n % 10 == 0 else " " + _ONES[n % 10])
-    if n < 1000:
-        rest = "" if n % 100 == 0 else " " + _cardinal(n % 100)
-        return f"{_ONES[n // 100]} HUNDRED{rest}"
-    for scale, name in _SCALES:
-        if n >= scale:
-            head, rest = divmod(n, scale)
-            return f"{_cardinal(head)} {name}" + ("" if rest == 0 else " " + _cardinal(rest))
-    raise AssertionError("unreachable")
-
-
-def _year(n: int) -> str:
-    # 1999 -> NINETEEN NINETY NINE, 1905 -> NINETEEN OH FIVE, 1900 -> NINETEEN HUNDRED
-    head, tail = divmod(n, 100)
-    if tail == 0:
-        return f"{_cardinal(head)} HUNDRED"
-    return f"{_cardinal(head)} {'OH ' if tail < 10 else ''}{_cardinal(tail)}"
-
-
-def _ordinal(words: str) -> str:
-    head, _, last = words.rpartition(" ")
-    if last in _ORDINALS:
-        last = _ORDINALS[last]
-    elif last.endswith("Y"):
-        last = last[:-1] + "IETH"
-    else:
-        last += "TH"
-    return f"{head} {last}".strip()
-
-
-def _digits(digits: str) -> str:
-    return " ".join(_ONES[int(d)] for d in digits)
-
-
-def _unit(key: str, count: str) -> str:
-    singular, plural = _UNIT_WORDS[key]
-    return singular if count == "1" else plural
-
-
-def _say_number(match: re.Match) -> str:
-    sign, currency, digits, decimals, ordinal, suffix = match.groups()
-    suffix = (suffix or "").lower()
-    scale = _SCALE_ABBREVIATIONS.get(suffix) if currency else None
-    plain = digits.replace(",", "")
-    if len(plain) > 15 or ("," not in digits and plain.startswith("0") and len(plain) > 1):
-        # Codes, IDs and phone numbers are read digit by digit.
-        spoken = _digits(plain)
-    elif len(digits) == 4 and not (currency or ordinal or decimals) and (
-        1100 <= int(plain) <= 1999 or 2010 <= int(plain) <= 2099
-    ):
-        # ponytail: 4-digit numbers in year range read as years ("twenty twenty
-        # six"). A count said "one thousand five hundred" then starts ~160 ms
-        # late (measured). Needs context to tell a year from a count.
-        spoken = _year(int(plain))
-    else:
-        spoken = _cardinal(int(plain))
-    if ordinal:
-        spoken = _ordinal(spoken)
-    fraction = (decimals or ".")[1:]
-    if fraction and not (currency and len(fraction) == 2 and not scale):
-        # "$2.5 million" is "two point five million dollars"; only 2 digits are cents
-        spoken += " POINT " + _digits(fraction)
-        fraction = ""
-    if scale:
-        spoken += " " + scale
-    if currency:
-        unit = _CURRENCIES[currency] + ("" if plain == "1" and not decimals and not scale else "S")
-        spoken = f"{spoken} {unit}" + (f" {_cardinal(int(fraction))}" if fraction.strip("0") else "")
-    if suffix in _UNIT_WORDS:
-        spoken += " " + _unit(suffix, digits if not decimals else "")
-    elif suffix and not scale:
-        spoken += " " + suffix.upper()  # "5m", "5k": left as written
-    if sign:
-        spoken = "MINUS " + spoken
-    return f" {spoken} "
+def _letters(text: str) -> str:
+    """Spoken text as the aligner's letters: symbols said, accents folded (café ->
+    CAFE), hyphens as word breaks; other punctuation is dropped by the vocab."""
+    for symbol, said in _SYMBOLS.items():
+        text = text.replace(symbol, said)
+    text = unicodedata.normalize("NFKD", text.upper().replace("-", " "))
+    return "".join(c for c in text if not unicodedata.combining(c))
 
 
 def _spoken_english(word: str) -> str:
-    """One Parakeet word as spoken English letters, spaces between spoken words.
-
-    Numbers, currency and symbols are said out; accents are folded (café ->
-    CAFE); remaining punctuation is dropped by the caller's vocab filter.
-    """
-    text = _NUMBER.sub(_say_number, word.translate(_APOSTROPHES))
-    for symbol, spoken in _SYMBOLS.items():
-        text = text.replace(symbol, spoken)
-    text = unicodedata.normalize("NFKD", text.upper())
-    return "".join(c for c in text if not unicodedata.combining(c))
+    """One Parakeet word as spoken English letters, spaces between spoken words."""
+    return _letters(spoken.spoken_word(word.translate(_APOSTROPHES), everywhere=True))
 
 
 def _normalize_english(words: Sequence[str]) -> list[str]:
     """Spoken letters for each of `words`, in the order they are said."""
-    spoken = [_spoken_english(word).split() for word in words]
-    # A unit written as its own word after a number: "25 lb" is "twenty five pounds".
-    for index in range(1, len(words)):
-        key = _TRAILING_PUNCTUATION.sub("", words[index]).lower()
-        previous = _TRAILING_PUNCTUATION.sub("", words[index - 1])
-        if key in _UNIT_WORDS and any(c.isdigit() for c in previous):
-            spoken[index] = _unit(key, previous).split()
-    # "$5 million" is said "five million dollars": the unit follows the scale word.
-    for current, following in zip(spoken, spoken[1:]):
-        if (
-            len(current) > 1
-            and current[-1] in _UNITS
-            and following
-            and re.sub(r"[^A-Z]", "", following[0]) in _SCALE_WORDS
-        ):
-            unit = current.pop()
-            following.insert(1, unit if unit.endswith("S") else unit + "S")
-    return [" ".join(parts) for parts in spoken]
+    said = spoken.spoken_words([word.translate(_APOSTROPHES) for word in words], everywhere=True)
+    return [_letters(text) for text in said]
 
 
 # --------------------------------------------------------------------------- #
@@ -251,7 +109,7 @@ _loaded: dict[str, tuple[Any, dict[str, int]]] = {}
 _failed_at: dict[str, float] = {}
 
 
-def _language(language: Optional[str]) -> str:
+def language_code(language: Optional[str]) -> str:
     """ISO 639-1 code for a request's `language` ("en-US", "English" -> "en")."""
     code = (language or "").strip().lower()
     if code in ("", "auto"):
@@ -261,7 +119,7 @@ def _language(language: Optional[str]) -> str:
 
 
 def supports(language: Optional[str]) -> bool:
-    return ALIGN_WORDS and _language(language) in ALIGN_MODELS
+    return ALIGN_WORDS and language_code(language) in ALIGN_MODELS
 
 
 def status() -> dict[str, str]:
@@ -441,7 +299,7 @@ def align_words(
     when no aligner is available, the text is not in the model's alphabet, or
     the audio cannot hold the text, so the caller keeps its own times.
     """
-    code = _language(language)
+    code = language_code(language)
     loaded = _load(code)
     if loaded is None:
         return None

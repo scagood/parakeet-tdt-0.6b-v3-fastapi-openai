@@ -99,7 +99,7 @@ def test_word_spans_return_none_for_audio_without_frames():
         ("$1", "ONE DOLLAR"),
         ("$1,000,000,000,000", "ONE TRILLION DOLLARS"),
         ("-5", "MINUS FIVE"),
-        ("mid-2020s", "MID- TWENTY TWENTY S"),
+        ("mid-2020s", "MID TWENTY TWENTY S"),
         ("50%", "FIFTY PERCENT"),
         ("007", "ZERO ZERO SEVEN"),
         ("R&D", "R AND D"),
@@ -125,7 +125,7 @@ def test_spoken_english_says_it_as_spoken(word, spoken):
 def test_money_and_weight_pounds_align_as_the_same_speech(written):
     # ASR often writes spoken "twenty five pounds" (money) as "25 lb", or back:
     # the text stays as written, and either way the aligner looks for the same sound.
-    assert " ".join(aligner._normalize_english(written)).split() == "TWENTY FIVE POUNDS".split()
+    assert " ".join(aligner._normalize_english(written)).rstrip(".").split() == "TWENTY FIVE POUNDS".split()
 
 
 def test_unit_words_only_follow_numbers():
@@ -136,7 +136,7 @@ def test_unit_words_only_follow_numbers():
 def test_normalize_english_moves_the_currency_after_its_scale_word():
     # "$5 million" is said "five million dollars"
     assert aligner._normalize_english(["cost", "$5", "million.", "now"]) == [
-        "COST", "FIVE", "MILLION. DOLLARS", "NOW",
+        "COST", "FIVE", "MILLION DOLLARS.", "NOW",
     ]
     assert aligner._normalize_english(["$1", "billion"]) == ["ONE", "BILLION DOLLARS"]
     assert aligner._normalize_english(["$5", "each"]) == ["FIVE DOLLARS", "EACH"]
@@ -151,7 +151,7 @@ def test_normalize_english_never_raises_on_absurd_numbers():
     [("en", "en"), ("EN", "en"), ("en-US", "en"), ("en_GB", "en"), ("English", "en"), ("fr", "fr")],
 )
 def test_language_codes(language, code):
-    assert aligner._language(language) == code
+    assert aligner.language_code(language) == code
 
 
 def test_missing_language_uses_the_configured_default(monkeypatch):

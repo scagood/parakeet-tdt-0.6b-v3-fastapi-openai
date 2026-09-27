@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from . import aligner
+from . import aligner, spoken
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
@@ -24,6 +24,7 @@ from .config import (
     MAX_UPLOAD_BYTES,
     MODEL_ALIASES,
     MODEL_CONFIGS,
+    SPOKEN_NUMBERS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
     logger,
@@ -243,10 +244,39 @@ def _apply_alignment(
         word["end"] = min(max(word["end"], word["start"]), high)
 
 
+def _speak_numbers(words: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """One chunk's words with numbers, money and units said out ("$5" -> "five
+    dollars"), or None if nothing changed (PARAKEET_SPOKEN_NUMBERS).
+
+    A word that becomes several shares its time span out by length; when the
+    aligner runs next it re-times each of them from the audio.
+    """
+    said = spoken.spoken_words([w["word"] for w in words])
+    if said == [w["word"] for w in words]:
+        return None
+    out: List[Dict[str, Any]] = []
+    for index, (word, text) in enumerate(zip(words, said)):
+        if text == word["word"]:
+            out.append(word)
+            continue
+        if spoken.starts_sentence(words[index - 1]["word"] if index else None):
+            text = spoken.capitalize(text)
+        parts = text.split()
+        total = sum(len(part) for part in parts)
+        start, span = word["start"], word["end"] - word["start"]
+        for position, part in enumerate(parts):
+            end = word["end"] if position == len(parts) - 1 else start + span * len(part) / total
+            out.append({"start": start, "end": end, "word": part})
+            start = end
+    return out
+
+
 def _stitch(
     prepared: _PreparedAudio,
     results: Sequence[Any],
     align: Optional[Callable[[Any, List[str]], Optional[List[Optional[aligner.Span]]]]] = None,
+    *,
+    speak: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
@@ -310,6 +340,11 @@ def _stitch(
             word_end = min(next_start, chunk_start + last_ts + _WORD_TAIL_SEC)
             word_end = min(chunk_end, max(word_start, word_end))
             chunk_words.append({"start": word_start, "end": word_end, "word": word})
+
+        if speak and (said := _speak_numbers(chunk_words)) is not None:
+            # Text and words are rewritten together so they always agree.
+            chunk_words = said
+            segments[-1]["segment"] = _clean_text(" ".join(w["word"] for w in chunk_words))
 
         if align is not None and chunk_words:
             _apply_alignment(
@@ -418,6 +453,7 @@ async def transcribe(
         timestamp_granularities_plain or []
     )
     want_words = output_format == "verbose_json" and "word" in granularities
+    speak = SPOKEN_NUMBERS and aligner.language_code(language) == "en"
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -434,13 +470,13 @@ async def transcribe(
         # and off the audio pool so it never holds up other requests' decoding.
         full_text, segments, words = await asyncio.get_running_loop().run_in_executor(
             request.app.state.align_pool,
-            _stitch,
+            functools.partial(_stitch, speak=speak),
             prepared,
             results,
             functools.partial(aligner.align_words, language=language),
         )
     else:
-        full_text, segments, words = _stitch(prepared, results)
+        full_text, segments, words = _stitch(prepared, results, speak=speak)
     stitch_ms = (time.perf_counter() - stitch_started) * 1000
 
     logger.info(
@@ -557,7 +593,12 @@ async def transcribe_batch(
         count = len(prepared.pieces)
         item_results = flat_results[cursor : cursor + count]
         cursor += count
-        text, _segments, _words = _stitch(prepared, item_results)
+        text, _segments, _words = _stitch(
+            prepared,
+            item_results,
+            # the batch endpoint takes no `language`: the default decides
+            speak=SPOKEN_NUMBERS and aligner.language_code(None) == "en",
+        )
         response_items.append(
             {"filename": filename, "text": text, "duration": prepared.duration}
         )

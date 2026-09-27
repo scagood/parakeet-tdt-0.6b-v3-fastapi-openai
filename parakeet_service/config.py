@@ -194,11 +194,15 @@ WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.
 # Word timestamps are re-timed by a wav2vec2 forced aligner (aligner.py) when a
 # request asks for them. The aligner downloads on the first such request.
 ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", True)
-# Language assumed for alignment when a request sends no `language`. Parakeet
-# v3 is multilingual and nothing here detects the language, so this is an
-# operator's statement about their audio. Empty means only align when the
-# request names a language.
+# Language assumed for alignment (and spoken numbers) when a request sends no
+# `language`. Parakeet v3 is multilingual and nothing here detects the language,
+# so this is an operator's statement about their audio. Empty means only align
+# when the request names a language.
 ALIGN_DEFAULT_LANGUAGE = os.getenv("PARAKEET_ALIGN_DEFAULT_LANGUAGE", "en").strip().lower()
+# Parakeet writes numbers the way it chooses, and not consistently: "twenty-five
+# pounds" may come back as "£25" or "25 lb", "five dollars" as "$5". On, English
+# transcripts say numbers, money and units in words instead (spoken.py).
+SPOKEN_NUMBERS = _env_bool("PARAKEET_SPOKEN_NUMBERS", False)
 
 MAX_UPLOAD_BYTES = _env_int(
     "PARAKEET_MAX_UPLOAD_BYTES", 256 * 1024 * 1024, minimum=1
