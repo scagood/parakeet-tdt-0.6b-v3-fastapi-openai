@@ -215,7 +215,7 @@ async def _prepare_in_pool(request: Request, raw: bytes) -> _PreparedAudio:
 
 def _apply_alignment(
     words: List[Dict[str, Any]],
-    spans: Optional[Sequence[Optional[Tuple[float, float]]]],
+    spans: Optional[Sequence[Optional[aligner.Span]]],
     chunk_start: float,
     chunk_end: float,
 ) -> None:
@@ -246,7 +246,7 @@ def _apply_alignment(
 def _stitch(
     prepared: _PreparedAudio,
     results: Sequence[Any],
-    align: Optional[Callable[[Any, List[str]], Optional[List[Optional[Tuple[float, float]]]]]] = None,
+    align: Optional[Callable[[Any, List[str]], Optional[List[Optional[aligner.Span]]]]] = None,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
@@ -318,6 +318,11 @@ def _stitch(
                 chunk_start,
                 chunk_end,
             )
+            # Segment bounds came from the model's estimates; keep them covering
+            # the re-timed words so a cue never ends before its last word.
+            segment = segments[-1]
+            segment["start"] = min(segment["start"], chunk_words[0]["start"])
+            segment["end"] = max(segment["end"], chunk_words[-1]["end"])
         words.extend(chunk_words)
 
     full_text = _clean_text(" ".join(item["segment"] for item in segments))
@@ -379,6 +384,7 @@ def health(request: Request):
         "loaded": loaded_models(),
         "default_model": default_model_name(),
         "cpu": CPU_INFO,
+        "aligner": aligner.status(),
     }
 
 
@@ -424,9 +430,10 @@ async def transcribe(
 
     stitch_started = time.perf_counter()
     if want_words and aligner.supports(language):
-        # Alignment runs a second ONNX model over the audio: keep it off the loop.
+        # Alignment runs a second ONNX model over the audio: keep it off the loop,
+        # and off the audio pool so it never holds up other requests' decoding.
         full_text, segments, words = await asyncio.get_running_loop().run_in_executor(
-            request.app.state.audio_pool,
+            request.app.state.align_pool,
             _stitch,
             prepared,
             results,
@@ -458,7 +465,7 @@ async def transcribe(
         return JSONResponse(
             {
                 "task": "transcribe",
-                "language": "auto",
+                "language": (language or "").strip() or "auto",
                 "duration": prepared.duration,
                 "text": full_text,
                 "segments": [

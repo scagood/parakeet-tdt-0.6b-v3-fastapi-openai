@@ -271,21 +271,41 @@ when `timestamp_granularities[]=word` is sent.
 
 #### Word timestamps
 
-For English (a request with `language=en` or no `language` at all), word
-times come from a forced aligner rather than from Parakeet. Parakeet decides the
-words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
+For English, word times come from a forced aligner rather than from Parakeet.
+Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
 finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
 no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
 estimated; aligned times sit on 20 ms frames and the ends come from the audio.
-Other languages keep Parakeet's times.
 
-The aligner only runs when words are requested. It downloads (~95 MB) on the
-first such request and runs on CPU, adding roughly 2 s per 30 s of audio on a
-4-core machine.
+* **Language.** `language` accepts `en`, `en-US`, `en_GB` or `english`. A
+  request without `language` (or with `auto`) is aligned as
+  `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it: nothing
+  detects the language. A chunk whose words are mostly in another alphabet
+  (Cyrillic, Greek, ...) keeps Parakeet's times, but Latin-script languages
+  sent without `language` are aligned as English — set the default empty if you
+  serve them. Other languages keep Parakeet's times.
+* **Numbers and symbols** are aligned as spoken: `42` as "forty two", `2026` as
+  "twenty twenty six", `$5 million` as "five million dollars", `-5`, `50%`,
+  `21st`; accents are folded (`café`). A count in year range (`1500`) is read as
+  a year, so if it was said "one thousand five hundred" it starts a little late.
+* **Transcript mistakes.** On clean speech, a word Parakeet missed or got wrong
+  does not drag its neighbours' times (as in MMS forced alignment, the gaps
+  between words can absorb speech the transcript lacks); in heavy noise it
+  occasionally still does. An invented word needs somewhere to go: in a pause
+  it takes the pause, but a long one invented in the middle of continuous
+  speech pushes its neighbours aside.
+
+The aligner only runs when words are requested, one request at a time on its
+own thread pool so it never holds up other requests' audio decoding. It
+downloads (~95 MB) on the first such request and runs on CPU, adding roughly
+2 s per 30 s of audio on a 4-core machine. If the download fails, word times
+fall back to Parakeet's and the load is retried every 5 minutes; `/health`
+reports the aligner's state under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
 | `PARAKEET_ALIGN_WORDS` | `true` | `false` keeps Parakeet's word times and never downloads the aligner |
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none; empty to align only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
 ### Batch transcription
