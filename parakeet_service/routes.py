@@ -16,6 +16,7 @@ from . import aligner
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
+    ALIGN_WORDS,
     CPU_INFO,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
@@ -417,6 +418,7 @@ async def transcribe(
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
+    align_words: Optional[bool] = Form(None),
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
@@ -425,6 +427,7 @@ async def transcribe(
         timestamp_granularities_plain or []
     )
     want_words = output_format == "verbose_json" and "word" in granularities
+    align = ALIGN_WORDS if align_words is None else align_words
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -436,7 +439,7 @@ async def transcribe(
     infer_ms = (time.perf_counter() - infer_started) * 1000
 
     stitch_started = time.perf_counter()
-    if want_words and aligner.supports(language):
+    if want_words and align and aligner.supports(language):
         # Alignment runs a second ONNX model over the audio: keep it off the loop,
         # and off the audio pool so it never holds up other requests' decoding.
         full_text, segments, words = await asyncio.get_running_loop().run_in_executor(

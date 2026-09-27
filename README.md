@@ -271,11 +271,26 @@ when `timestamp_granularities[]=word` is sent.
 
 #### Word timestamps
 
-For English, word times come from a forced aligner rather than from Parakeet.
-Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
+For English, word times can come from a forced aligner rather than from
+Parakeet. Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
 finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
 no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
 estimated; aligned times sit on 20 ms frames and the ends come from the audio.
+
+It is opt-in: send the form field `align_words=true` (or `false` to opt out
+where the server default is on). Requests that don't say get
+`PARAKEET_ALIGN_WORDS`, off unless you change it.
+
+```python
+transcript = client.audio.transcriptions.create(
+  model="parakeet-v3-fp32",
+  file=audio_file,
+  response_format="verbose_json",
+  timestamp_granularities=["word"],
+  language="en",
+  extra_body={"align_words": True},
+)
+```
 
 * **Language.** `language` accepts `en`, `en-US`, `en_GB` or `english`. A
   request without `language` (or with `auto`) is aligned as
@@ -298,16 +313,16 @@ estimated; aligned times sit on 20 ms frames and the ends come from the audio.
   it takes the pause, but a long one invented in the middle of continuous
   speech pushes its neighbours aside.
 
-The aligner only runs when words are requested, one request at a time on its
-own thread pool so it never holds up other requests' audio decoding. It
-downloads (~95 MB) on the first such request and runs on CPU, adding roughly
-2 s per 30 s of audio on a 4-core machine. If the download fails, word times
-fall back to Parakeet's and the load is retried every 5 minutes; `/health`
-reports the aligner's state under `aligner`.
+The aligner only runs when alignment is on and words are returned, one request
+at a time on its own thread pool so it never holds up other requests' audio
+decoding. It downloads (~95 MB) on the first such request and runs on CPU,
+adding roughly 2 s per 30 s of audio on a 4-core machine. If the download
+fails, word times fall back to Parakeet's and the load is retried every 5
+minutes; `/health` reports the aligner's state under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_ALIGN_WORDS` | `true` | `false` keeps Parakeet's word times and never downloads the aligner |
+| `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every English word request unless it sends `align_words=false` |
 | `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none; empty to align only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
