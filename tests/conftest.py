@@ -12,6 +12,8 @@ import os
 import sys
 import types
 
+import pytest
+
 # Tests never download models: a code path that reaches the real aligner loader
 # fails fast (and falls back) instead of fetching ~95 MB.
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -24,3 +26,27 @@ except ImportError:
     ort_stub.get_available_providers = lambda: ["CPUExecutionProvider"]
     sys.modules.setdefault("onnx_asr", types.ModuleType("onnx_asr"))
     sys.modules.setdefault("onnxruntime", ort_stub)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_aligner(monkeypatch):
+    """Nothing reaches the real aligner loader unless a test fakes it (fake
+    aligner.for_chunk, or the hub as test_aligner's loader tests do): it would
+    download ~95 MB or quietly load a cached model, so a test that does fails.
+    Load state starts empty, so no test sees another's failed or faked load."""
+    from parakeet_service import aligner
+
+    reached = []
+
+    def download(repo, filename, revision=None):
+        reached.append(filename)
+        raise OSError("tests never download models")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=download))
+    # CI's onnxruntime stub has no InferenceSession: without one the loader
+    # fails before its download, and this guard would never see it.
+    monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(aligner, "_loaded", {})
+    monkeypatch.setattr(aligner, "_failed_at", {})
+    yield
+    assert not reached, f"reached the real aligner loader for {reached}: fake aligner.for_chunk"

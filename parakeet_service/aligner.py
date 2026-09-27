@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+import string
 import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Container, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
@@ -35,7 +36,10 @@ _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
 # is said as its name ("ten p" is "ten pee", "Plan B" is "plan bee").
 _SAID_AS = {
     "NOUGHT": "NAWT",
-    **dict(zip("BCDEFGHJKLMNPQRSTUVWXYZ", "BEE SEE DEE EE EF JEE AYCH JAY KAY EL EM EN PEE KYOO AR ES TEE YOU VEE DOUBLEYOU EX WHY ZEE".split())),
+    **dict(zip(
+        "BCDEFGHJKLMNPQRSTUVWXYZ",
+        "BEE SEE DEE EE EF JEE AYCH JAY KAY EL EM EN PEE KYOO AR ES TEE YOU VEE DOUBLEYOU EX WHY ZEE".split(),
+    )),
 }
 
 
@@ -50,15 +54,26 @@ def _letters(text: str) -> str:
     return " ".join(_SAID_AS.get(token.strip(".,!?;:\"'()"), token) for token in text.split())
 
 
-def _spoken_english(word: str) -> str:
-    """One Parakeet word as spoken English letters, spaces between spoken words."""
-    return _letters(spoken.spoken_word(word.translate(_APOSTROPHES), everywhere=True))
-
-
 def _normalize_english(words: Sequence[str]) -> list[str]:
     """Spoken letters for each of `words`, in the order they are said."""
     said = spoken.spoken_words([word.translate(_APOSTROPHES) for word in words], everywhere=True)
     return [_letters(text) for text in said]
+
+
+def _mostly_unknown(words: Sequence[str], said: Sequence[str], known: Container[str]) -> bool:
+    """Whether most of `words` that have letters have none in `known` once
+    said (`said`, one text per word): Cyrillic, Greek, ... in a model of Latin
+    letters. That is not its language, and forcing it would be worse than
+    leaving the words alone."""
+    lettered = [text for word, text in zip(words, said) if any(c.isalpha() for c in word)]
+    return 2 * sum(not any(c in known for c in text) for text in lettered) > len(lettered)
+
+
+def other_alphabet(words: Sequence[str]) -> bool:
+    """Whether `words` are mostly in an alphabet English is not written in, by
+    the rule the aligner uses to leave them untimed (spoken numbers leave them
+    as written too). Accents are folded first: "café" is Latin."""
+    return _mostly_unknown(words, [_letters(word) for word in words], string.ascii_uppercase)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +179,7 @@ def _load(language: str) -> Optional[tuple[Any, dict[str, int]]]:
             # per 30 s of audio to tens of ms on GPU hosts; untested, so not wired.
             session = ort.InferenceSession(
                 fetch(spec.onnx),
-                # Only word requests use it, so don't leave threads spinning between calls.
+                # Only word and spoken-number requests use it: no threads spinning between calls.
                 sess_options=_build_sess_options(ALIGN_THREADS, spinning=False),
                 providers=["CPUExecutionProvider"],
             )
@@ -210,22 +225,14 @@ def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return stacked, np.concatenate(starts) / TARGET_SR
 
 
-def forced_align(
-    emission: np.ndarray, targets: Sequence[int], *, blank: int
-) -> Optional[list[tuple[int, int]]]:
-    """Viterbi path of `targets` through CTC log-probs `emission` (T, V).
-
-    Returns one (start_frame, end_frame_exclusive) per target, or None when the
-    audio has too few frames to hold the targets.
-    """
-    path = _viterbi(emission, targets, blank=blank)
-    return None if path is None else path[0]
-
-
 def _viterbi(
     emission: np.ndarray, targets: Sequence[int], *, blank: int
 ) -> Optional[tuple[list[tuple[int, int]], float]]:
-    """forced_align(), plus the best path's total log-prob."""
+    """Viterbi path of `targets` through CTC log-probs `emission` (T, V).
+
+    Returns one (start_frame, end_frame_exclusive) per target and the path's
+    total log-prob, or None when the audio has too few frames to hold the targets.
+    """
     n = len(targets)
     if n == 0:
         return [], 0.0
@@ -332,7 +339,8 @@ def word_spans(
 
 class ChunkAligner:
     """One chunk's audio, ready to time its words or to hear which of several
-    readings of a word was said. The wav2vec2 pass runs once, on first use.
+    readings of a word was said. The wav2vec2 pass runs once, on first use,
+    and a failed one is not retried.
 
     Everything here refines a finished transcript: failures are logged and
     answered with "don't know" (None, or the first reading), never raised.
@@ -349,12 +357,19 @@ class ChunkAligner:
 
     def _emission(self) -> tuple[np.ndarray, np.ndarray]:
         if self._frames is None:
-            self._frames = _emission(self._session, self._wav)
+            try:
+                self._frames = _emission(self._session, self._wav)
+            except Exception:
+                # Once per chunk, not once per question: with no frames, every
+                # later span or score of this chunk is "don't know".
+                logger.exception("wav2vec2 pass failed; keeping model word times and default readings")
+                self._frames = np.empty((0, 0)), np.empty(0)
         return self._frames
 
-    def _spoken(self, words: Sequence[str]) -> list[tuple[int, list[int]]]:
+    def _spoken(self, said: Sequence[str]) -> list[tuple[int, list[int]]]:
+        """(word index, character ids) for each spoken part of each word's `said` text."""
         spoken: list[tuple[int, list[int]]] = []
-        for index, text in enumerate(self._normalize(words)):
+        for index, text in enumerate(said):
             for part in text.split():
                 if ids := [self._vocab[c] for c in part if c in self._vocab]:
                     spoken.append((index, ids))
@@ -367,13 +382,9 @@ class ChunkAligner:
         the text is not in the model's alphabet or the audio cannot hold it.
         """
         try:
-            spoken = self._spoken(words)
-            lettered = [i for i, word in enumerate(words) if any(c.isalpha() for c in word)]
-            placed = {owner for owner, _ids in spoken}
-            unplaceable = sum(i not in placed for i in lettered)
-            # Mostly letters the model has never seen (Cyrillic, Greek, ...): this is
-            # not its language, and forcing it would be worse than the model's times.
-            if not spoken or unplaceable * 2 > len(lettered):
+            said = self._normalize(words)
+            spoken = self._spoken(said)
+            if not spoken or _mostly_unknown(words, said, self._vocab):
                 return None
             emission, frame_starts = self._emission()
             return word_spans(
@@ -383,9 +394,10 @@ class ChunkAligner:
             logger.exception("word alignment failed; keeping model word times")
             return None
 
-    def best(self, options: Sequence[str], start: float, end: float) -> int:
-        """Index of the reading in `options` that best matches the audio between
-        `start` and `end` seconds (0 if it cannot tell).
+    def scores(self, options: Sequence[str], start: float, end: float) -> list[float]:
+        """How well each reading in `options` matches the audio between `start`
+        and `end` seconds: its best path's log-prob, -inf where it does not fit
+        (all -inf if it cannot tell).
 
         Every reading is scored over the same frames, with the star states on
         either side: a reading that leaves out a spoken word pays for the audio
@@ -398,16 +410,21 @@ class ChunkAligner:
             for option in options:
                 path = _star_path(
                     window,
-                    self._spoken([option]),
+                    self._spoken(self._normalize([option])),
                     blank=self._blank,
                     separator=self._separator,
                     penalty=_CHOICE_STAR_PENALTY,
                 )
-                scores.append(_NEG_INF if path is None else path[1])
-            return int(np.argmax(scores)) if max(scores) > _NEG_INF else 0
+                scores.append(float("-inf") if path is None else path[1])
+            return scores
         except Exception:
             logger.exception("reading choice failed; keeping the default reading")
-            return 0
+            return [float("-inf")] * len(options)
+
+    def best(self, options: Sequence[str], start: float, end: float) -> int:
+        """Index of the reading in `options` that best matches the audio between
+        `start` and `end` seconds (0, the default reading, if it cannot tell)."""
+        return int(np.argmax(self.scores(options, start, end)))
 
 
 def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[ChunkAligner]:
@@ -420,12 +437,3 @@ def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[Chunk
         return None
     session, vocab = loaded
     return ChunkAligner(wav, session, vocab, ALIGN_MODELS[code].normalize)
-
-
-def align_words(
-    wav: np.ndarray, words: Sequence[str], language: Optional[str] = None
-) -> Optional[list[Optional[Span]]]:
-    """(start, end) seconds from the start of `wav` for each of `words`, or None
-    when no aligner is available or it cannot place them."""
-    chunk = for_chunk(wav, language)
-    return None if chunk is None else chunk.spans(words)
