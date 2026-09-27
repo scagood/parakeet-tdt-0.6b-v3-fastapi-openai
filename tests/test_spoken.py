@@ -34,6 +34,71 @@ def test_whole_numbers_are_said_out(written, said):
     assert _say(written) == said
 
 
+def _plain(text):
+    return " ".join(text.lower().replace("-", " ").replace(",", "").split())
+
+
+# Every way transcript-align's number strategy knows a numeral can be said
+# (@darksheep/transcript-align, strategies/numbers/number.test.js), turned
+# around: the spoken form must be among the readings of the written one, so
+# the audio gets the chance to pick it.
+@pytest.mark.parametrize(
+    ("written", "said"),
+    [
+        ("9", "nine"), ("4th", "fourth"), ("50s", "fifties"), ("45", "forty five"),
+        ("21st", "twenty first"), ("300", "three hundred"), ("1100", "eleven hundred"),
+        ("145", "a hundred and forty five"), ("160", "a hundred and sixty"),
+        ("3000", "three thousand"), ("1,000", "a thousand"), ("3000000", "three million"),
+        ("1000000", "a million"), ("2000000000", "two billion"),
+        ("1003005", "one million three thousand and five"),
+        ("1105", "eleven hundred five"), ("1105", "eleven hundred and five"),
+        ("1105", "one thousand one hundred and five"), ("1984", "nineteen eighty four"),
+        ("1105", "one one oh five"),
+        ("007", "double oh seven"), ("333", "treble three"), ("7733", "double seven double three"),
+        ("566644", "five triple six double four"), ("0800", "oh eight hundred"),
+        ("01111", "zero one triple one"), ("273377", "two seven double three double seven"),
+        ("273377", "twenty seven thirty three seventy seven"),
+        ("0776611333", "oh double seven six six double one triple three"),
+        ("1:14", "one fourteen"), ("3:16", "three sixteen"), ("1:10", "one ten"),
+        ("1970s", "seventies"), ("1970s", "nineteen seventies"), ("1980s", "eighties"),
+        ("2020s", "twenties"), ("2020s", "twenty twenties"),
+        ("£2.50", "two pounds fifty"), ("$2.50", "two dollars fifty"), ("2.50", "two fifty"),
+        ("£2", "two pounds"), ("£2", "two quid"), ("£2.50", "two fifty"),
+        ("$2.22", "two twenty two"), ("$2.22", "two dollars and twenty two cents"),
+        ("50p", "fifty pence"), ("$0.50", "fifty cents"), ("£1.50", "a pound fifty"),
+        ("£250", "two hundred and fifty pounds"), ("£250", "two hundred and fifty"),
+        ("£1,105.50", "eleven hundred and five pounds fifty"),
+        ("10.5", "ten point five"), ("10.5", "ten and a half"), ("10.25", "ten and a quarter"),
+        ("10.75", "ten and three quarters"), ("10.25", "ten and a fourth"),
+        ("10.75", "ten and three fourths"), ("1.05", "one point oh five"),
+        ("156.5", "one hundred and fifty six point five"),
+        ("227.6", "two hundred and twenty seven point six"),
+    ],
+)
+def test_every_known_way_of_saying_it_is_a_reading(written, said):
+    assert _plain(said) in [_plain(option) for option in spoken.readings(written)]
+
+
+# What Parakeet actually wrote for these, in the TTS corpus.
+@pytest.mark.parametrize(
+    ("written", "said"),
+    [
+        ("cost$25", "cost twenty five dollars"), ("paid$3.50", "paid three dollars and fifty cents"),
+        ("£11.40", "eleven pounds and forty pence"), ("£150", "a hundred and fifty pounds"),
+        ("1030", "ten thirty"), ("715am", "seven fifteen am"), ("1145", "eleven forty five"),
+        ("1500", "fifteen hundred"), ("1500", "one thousand five hundred"),
+        ("999", "nine nine nine"), ("911", "nine one one"), ("911", "nine eleven"),
+        ("4421", "four four two one"), ("101", "one oh one"), ("7772", "triple seven two"),
+        ("747", "seven four seven"), ("550", "five fifty"), ("5.50", "five fifty"),
+        ("2-1", "two one"), ("108-99", "one hundred and eight to ninety nine"),
+        ("555-1234", "five five five one two three four"), ("3.12", "three point twelve"),
+        ("0.05", "zero point zero five"), ("64,", "six four"),
+    ],
+)
+def test_what_parakeet_writes_can_be_heard_as_what_was_said(written, said):
+    assert _plain(said) in [_plain(option) for option in spoken.readings(written)]
+
+
 @pytest.mark.parametrize("written", ["an MP3 player", "COVID-19 cases", "it is 5m long", "a 5k run", "B2B sales"])
 def test_names_and_ambiguous_numbers_are_left_as_written(written):
     assert _say(written) == written
@@ -55,9 +120,13 @@ def _words(*items):
     return [{"word": w, "start": s, "end": e} for w, s, e in items]
 
 
+def _no_audio():
+    return None
+
+
 def test_speak_numbers_splits_a_word_span_by_length():
     words = _words(("It", 0.0, 0.2), ("cost", 0.2, 0.5), ("$5", 0.5, 1.0))
-    said = routes._speak_numbers(words)
+    said = routes._speak_numbers(words, _no_audio)
     assert [w["word"] for w in said] == ["It", "cost", "five", "dollars"]
     five, dollars = said[2], said[3]
     assert five["start"] == 0.5 and dollars["end"] == 1.0
@@ -65,12 +134,12 @@ def test_speak_numbers_splits_a_word_span_by_length():
 
 
 def test_speak_numbers_capitalizes_at_sentence_start_only():
-    said = routes._speak_numbers(_words(("$5", 0.0, 1.0), ("is", 1.0, 1.2), ("fine.", 1.2, 1.5), ("$5", 1.5, 2.0)))
+    said = routes._speak_numbers(_words(("$5", 0.0, 1.0), ("is", 1.0, 1.2), ("fine.", 1.2, 1.5), ("$5", 1.5, 2.0)), _no_audio)
     assert [w["word"] for w in said] == ["Five", "dollars", "is", "fine.", "Five", "dollars"]
 
 
 def test_speak_numbers_returns_none_when_nothing_changes():
-    assert routes._speak_numbers(_words(("hello", 0.0, 0.5), ("MP3", 0.5, 1.0))) is None
+    assert routes._speak_numbers(_words(("hello", 0.0, 0.5), ("MP3", 0.5, 1.0)), _no_audio) is None
 
 
 def _prepared():
@@ -95,12 +164,50 @@ def test_stitch_leaves_text_alone_when_off_or_nothing_to_say():
     assert routes._stitch(_prepared(), [_result("No numbers here.")], speak=True)[0] == "No numbers here."
 
 
-def test_aligner_times_the_spoken_words():
-    seen = []
+class _Ear:
+    """Stands in for aligner.ChunkAligner: word i sits at (i, i + 0.5) seconds,
+    and best() answers with whichever option contains `heard`."""
 
-    def fake_align(_wav, words):
-        seen.append(words)
-        return [(0.1 * i, 0.1 * i + 0.05) for i in range(len(words))]
+    def __init__(self, heard=None):
+        self.heard, self.timed, self.windows = heard, [], []
 
-    routes._stitch(_prepared(), [_result("It cost $5 today.")], fake_align, speak=True)
-    assert seen == [["It", "cost", "five", "dollars", "today."]]
+    def spans(self, words):
+        self.timed.append(list(words))
+        return [(float(i), i + 0.5) for i in range(len(words))]
+
+    def best(self, options, start, end):
+        self.windows.append((start, end))
+        return next((i for i, option in enumerate(options) if self.heard and self.heard in option), 0)
+
+
+def test_aligner_times_the_spoken_words(monkeypatch):
+    ear = _Ear()
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    routes._stitch(_prepared(), [_result("It cost $5 today.")], align=True, speak=True)
+    assert ear.timed[-1] == ["It", "cost", "five", "dollars", "today."]
+
+
+def test_the_audio_picks_the_reading_that_was_said(monkeypatch):
+    ear = _Ear(heard="and ten pence")
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    text = routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True)[0]
+    assert text == "That'll be two pounds and ten pence please."
+    # heard between its neighbours' edges: "be" ends at 2.5, "please." starts at 3.0
+    assert ear.windows == [(1.5, 3.0)]
+
+
+def test_without_audio_the_first_reading_is_used(monkeypatch):
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
+    assert routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True)[0] == (
+        "That'll be two pounds ten please."
+    )
+
+
+def test_unambiguous_numbers_never_load_the_aligner(monkeypatch):
+    def refuse(_wav, _language):
+        raise AssertionError("no ambiguity, no model")
+
+    monkeypatch.setattr(routes.aligner, "for_chunk", refuse)
+    assert routes._stitch(_prepared(), [_result("It was 50% on the 21st.")], speak=True)[0] == (
+        "It was fifty percent on the twenty-first."
+    )

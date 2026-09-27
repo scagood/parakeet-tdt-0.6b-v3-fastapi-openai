@@ -204,9 +204,17 @@ def forced_align(
     Returns one (start_frame, end_frame_exclusive) per target, or None when the
     audio has too few frames to hold the targets.
     """
+    path = _viterbi(emission, targets, blank=blank)
+    return None if path is None else path[0]
+
+
+def _viterbi(
+    emission: np.ndarray, targets: Sequence[int], *, blank: int
+) -> Optional[tuple[list[tuple[int, int]], float]]:
+    """forced_align(), plus the best path's total log-prob."""
     n = len(targets)
     if n == 0:
-        return []
+        return [], 0.0
     repeats = sum(a == b for a, b in zip(targets, targets[1:]))
     frames = emission.shape[0]
     if frames < n + repeats:  # repeats need a blank between them
@@ -230,6 +238,7 @@ def forced_align(
         back[t] = choice = options.argmax(axis=0)
         score = options[choice, columns] + emit[t]
 
+    best = score[-1] if score[-1] >= score[-2] else score[-2]
     state = width - 1 if score[-1] >= score[-2] else width - 2
     path = np.empty(frames, dtype=np.int64)
     for t in range(frames - 1, -1, -1):
@@ -240,22 +249,20 @@ def forced_align(
     for index in range(n):
         hits = np.flatnonzero(path == 2 * index + 1)
         spans.append((int(hits[0]), int(hits[-1]) + 1))
-    return spans
+    return spans, float(best)
 
 
-def word_spans(
+def _star_path(
     emission: np.ndarray,
-    frame_starts: np.ndarray,
     spoken: Sequence[tuple[int, Sequence[int]]],
-    n_words: int,
     *,
     blank: int,
     separator: Optional[int],
-) -> Optional[list[Optional[Span]]]:
-    """Force-align spoken words and return (start, end) seconds per word.
+) -> Optional[tuple[list[tuple[int, int, int]], float]]:
+    """Force-align spoken words between "star" separators.
 
-    `spoken` holds (word index, character ids) in order; a word may appear more
-    than once ("2026" is said as three words). Words absent from it get None.
+    Returns (owner, first frame, end frame) per character, frames counted in
+    `emission`, and the path's total log-prob; None if the audio cannot hold it.
     """
     if not spoken or emission.shape[0] == 0:  # no text, or audio too short for a frame
         return None
@@ -273,63 +280,132 @@ def word_spans(
     for owner, ids in spoken:
         targets.extend([*ids, star])
         owners.extend([owner] * len(ids) + [-1])
-    spans = forced_align(emission, targets, blank=blank)
-    if spans is None:
+    path = _viterbi(emission, targets, blank=blank)
+    if path is None:
         return None
+    spans, score = path
+    # -1: the leading pad frame shifts every real frame by one
+    return [(owner, first - 1, last - 1) for (first, last), owner in zip(spans, owners) if owner >= 0], score
 
+
+def word_spans(
+    emission: np.ndarray,
+    frame_starts: np.ndarray,
+    spoken: Sequence[tuple[int, Sequence[int]]],
+    n_words: int,
+    *,
+    blank: int,
+    separator: Optional[int],
+) -> Optional[list[Optional[Span]]]:
+    """Force-align spoken words and return (start, end) seconds per word.
+
+    `spoken` holds (word index, character ids) in order; a word may appear more
+    than once ("2026" is said as three words). Words absent from it get None.
+    """
+    path = _star_path(emission, spoken, blank=blank, separator=separator)
+    if path is None:
+        return None
     frame_sec = _STRIDE / TARGET_SR
     words: list[Optional[Span]] = [None] * n_words
-    for (first, last), owner in zip(spans, owners):
-        if owner < 0:
-            continue
-        # -1: the leading pad frame shifts every real frame by one
-        start = float(frame_starts[first - 1])
-        end = float(frame_starts[last - 2]) + frame_sec
+    for owner, first, last in path[0]:
+        start, end = float(frame_starts[first]), float(frame_starts[last - 1]) + frame_sec
         current = words[owner]
         words[owner] = (start, end) if current is None else (current[0], end)
     return words
 
 
-def align_words(
-    wav: np.ndarray, words: Sequence[str], language: Optional[str] = None
-) -> Optional[list[Optional[Span]]]:
-    """(start, end) seconds from the start of `wav` for each of `words`.
+class ChunkAligner:
+    """One chunk's audio, ready to time its words or to hear which of several
+    readings of a word was said. The wav2vec2 pass runs once, on first use.
 
-    A word with no characters the model knows gets None. Returns None outright
-    when no aligner is available, the text is not in the model's alphabet, or
-    the audio cannot hold the text, so the caller keeps its own times.
+    Everything here refines a finished transcript: failures are logged and
+    answered with "don't know" (None, or the first reading), never raised.
     """
+
+    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], normalize):
+        self._wav = wav
+        self._session = session
+        self._vocab = vocab
+        self._normalize = normalize
+        self._blank = vocab.get("<pad>", 0)
+        self._separator = vocab.get("|")
+        self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
+
+    def _emission(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._frames is None:
+            self._frames = _emission(self._session, self._wav)
+        return self._frames
+
+    def _spoken(self, words: Sequence[str]) -> list[tuple[int, list[int]]]:
+        spoken: list[tuple[int, list[int]]] = []
+        for index, text in enumerate(self._normalize(words)):
+            for part in text.split():
+                if ids := [self._vocab[c] for c in part if c in self._vocab]:
+                    spoken.append((index, ids))
+        return spoken
+
+    def spans(self, words: Sequence[str]) -> Optional[list[Optional[Span]]]:
+        """(start, end) seconds from the chunk start for each of `words`.
+
+        A word with no characters the model knows gets None. None outright when
+        the text is not in the model's alphabet or the audio cannot hold it.
+        """
+        try:
+            spoken = self._spoken(words)
+            lettered = [i for i, word in enumerate(words) if any(c.isalpha() for c in word)]
+            placed = {owner for owner, _ids in spoken}
+            unplaceable = sum(i not in placed for i in lettered)
+            # Mostly letters the model has never seen (Cyrillic, Greek, ...): this is
+            # not its language, and forcing it would be worse than the model's times.
+            if not spoken or unplaceable * 2 > len(lettered):
+                return None
+            emission, frame_starts = self._emission()
+            return word_spans(
+                emission, frame_starts, spoken, len(words), blank=self._blank, separator=self._separator
+            )
+        except Exception:
+            logger.exception("word alignment failed; keeping model word times")
+            return None
+
+    def best(self, options: Sequence[str], start: float, end: float) -> int:
+        """Index of the reading in `options` that best matches the audio between
+        `start` and `end` seconds (0 if it cannot tell).
+
+        Every reading is scored over the same frames, with the star states on
+        either side: a reading that leaves out a spoken word pays for the audio
+        it cannot explain, one that adds a word has to find letters for it.
+        """
+        try:
+            emission, frame_starts = self._emission()
+            window = emission[(frame_starts >= start) & (frame_starts < end)]
+            scores = []
+            for option in options:
+                path = _star_path(
+                    window, self._spoken([option]), blank=self._blank, separator=self._separator
+                )
+                scores.append(_NEG_INF if path is None else path[1])
+            return int(np.argmax(scores)) if max(scores) > _NEG_INF else 0
+        except Exception:
+            logger.exception("reading choice failed; keeping the default reading")
+            return 0
+
+
+def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[ChunkAligner]:
+    """A ChunkAligner for `wav`, or None when no aligner serves `language`."""
+    if not supports(language):
+        return None
     code = language_code(language)
     loaded = _load(code)
     if loaded is None:
         return None
     session, vocab = loaded
+    return ChunkAligner(wav, session, vocab, ALIGN_MODELS[code].normalize)
 
-    # Everything below is refinement of a finished transcript: any failure
-    # falls back to the model's own times rather than failing the request.
-    try:
-        spoken: list[tuple[int, list[int]]] = []
-        lettered = unplaceable = 0
-        for index, text in enumerate(ALIGN_MODELS[code].normalize(words)):
-            parts = [ids for part in text.split() if (ids := [vocab[c] for c in part if c in vocab])]
-            spoken.extend((index, ids) for ids in parts)
-            if any(c.isalpha() for c in words[index]):
-                lettered += 1
-                unplaceable += not parts
-        # Mostly letters the model has never seen (Cyrillic, Greek, ...): this is
-        # not its language, and forcing it would be worse than the model's times.
-        if not spoken or unplaceable * 2 > lettered:
-            return None
-        emission, frame_starts = _emission(session, wav)
-        return word_spans(
-            emission,
-            frame_starts,
-            spoken,
-            len(words),
-            blank=vocab.get("<pad>", 0),
-            separator=vocab.get("|"),
-        )
-    except Exception:
-        # The transcript is already done; a failed refinement must not fail it.
-        logger.exception("word alignment failed; keeping model word times")
-        return None
+
+def align_words(
+    wav: np.ndarray, words: Sequence[str], language: Optional[str] = None
+) -> Optional[list[Optional[Span]]]:
+    """(start, end) seconds from the start of `wav` for each of `words`, or None
+    when no aligner is available or it cannot place them."""
+    chunk = for_chunk(wav, language)
+    return None if chunk is None else chunk.spans(words)

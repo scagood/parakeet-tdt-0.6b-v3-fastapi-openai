@@ -33,16 +33,25 @@ def calls(monkeypatch):
     """Record aligner calls; the fake aligner re-times words to 0.1 s + 1.5 s each."""
     recorded = []
 
-    def fake_align(chunk_wav, words, language=None):
-        recorded.append({"words": words, "language": language, "thread": threading.current_thread().name})
-        return [(0.1 + 1.5 * i, 0.4 + 1.5 * i) for i in range(len(words))]
+    class FakeChunk:
+        def __init__(self, language):
+            self.language = language
+
+        def spans(self, words):
+            recorded.append(
+                {"words": list(words), "language": self.language, "thread": threading.current_thread().name}
+            )
+            return [(0.1 + 1.5 * i, 0.4 + 1.5 * i) for i in range(len(words))]
+
+    def fake_for_chunk(_wav, language):
+        return FakeChunk(language) if aligner.supports(language) else None
 
     async def fake_prepare(_request, _raw):
         return routes._PreparedAudio(
             waveform=None, ranges=[(0, 2 * TARGET_SR)], pieces=["chunk"], duration=2.0
         )
 
-    monkeypatch.setattr(aligner, "align_words", fake_align)
+    monkeypatch.setattr(aligner, "for_chunk", fake_for_chunk)
     monkeypatch.setattr(aligner, "ALIGN_WORDS", True)
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     monkeypatch.setattr(routes, "_prepare_in_pool", fake_prepare)

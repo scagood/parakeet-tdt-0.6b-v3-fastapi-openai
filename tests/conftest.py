@@ -8,8 +8,13 @@ provider probing monkeypatch the attributes they need.
 """
 from __future__ import annotations
 
+import os
 import sys
 import types
+
+# Tests never download models: a code path that reaches the real aligner loader
+# fails fast (and falls back) instead of fetching ~95 MB.
+os.environ["HF_HUB_OFFLINE"] = "1"
 
 try:
     import onnx_asr  # noqa: F401

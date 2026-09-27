@@ -78,19 +78,27 @@ def test_second_chunk_words_use_chunk_offset():
     assert words[1]["start"] == 10.5
 
 
-def test_aligner_retimes_each_chunk_from_its_own_audio():
+class _FakeChunk:
+    """Stands in for aligner.ChunkAligner: re-times word i to (0.25 + i, 0.5 + i)."""
+
+    def __init__(self, wav, calls):
+        self.wav, self.calls = wav, calls
+
+    def spans(self, words):
+        self.calls.append((self.wav, list(words)))
+        return [(0.25 + i, 0.5 + i) for i in range(len(words))]
+
+
+def test_aligner_retimes_each_chunk_from_its_own_audio(monkeypatch):
     first = _result([" hi", " there"], [0.0, 0.8])
     second = _result([" bye"], [0.0])
     calls = []
-
-    def fake_align(chunk_wav, words):
-        calls.append((chunk_wav, words))
-        return [(0.25 + i, 0.5 + i) for i in range(len(words))]
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, language: _FakeChunk(wav, calls))
 
     _text, _segments, words = routes._stitch(
         _prepared([(0.0, 2.0), (5.0, 7.0)], pieces=["chunk0", "chunk1"]),
         [first, second],
-        fake_align,
+        align=True,
     )
     assert calls == [("chunk0", ["hi", "there"]), ("chunk1", ["bye"])]
     assert [(w["word"], w["start"], w["end"]) for w in words] == [
@@ -100,12 +108,11 @@ def test_aligner_retimes_each_chunk_from_its_own_audio():
     ]
 
 
-def test_unavailable_aligner_keeps_model_times():
+def test_unavailable_aligner_keeps_model_times(monkeypatch):
     prepared = _prepared([(0.0, 2.0)])
     result = _result([" hi"], [0.4])
-    assert routes._stitch(prepared, [result], lambda _wav, _words: None) == routes._stitch(
-        prepared, [result]
-    )
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, language: None)
+    assert routes._stitch(prepared, [result], align=True) == routes._stitch(prepared, [result])
 
 
 def test_unaligned_words_stay_between_aligned_neighbours():

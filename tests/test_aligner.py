@@ -99,7 +99,7 @@ def test_word_spans_return_none_for_audio_without_frames():
         ("$1", "ONE DOLLAR"),
         ("$1,000,000,000,000", "ONE TRILLION DOLLARS"),
         ("-5", "MINUS FIVE"),
-        ("mid-2020s", "MID TWENTY TWENTY S"),
+        ("mid-2020s", "MID TWENTY TWENTIES"),
         ("50%", "FIFTY PERCENT"),
         ("007", "ZERO ZERO SEVEN"),
         ("R&D", "R AND D"),

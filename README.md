@@ -311,6 +311,35 @@ reports the aligner's state under `aligner`.
 | `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none; empty to align only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
+#### Spoken numbers
+
+Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
+may come back as `£25` or `25 lb`, "five dollars" as `$5`, "ten thirty" as
+`1030`, and "nine one one" as `911`. With `PARAKEET_SPOKEN_NUMBERS=true`,
+English transcripts (text, segments, words, every response format and the batch
+endpoint) say numbers, money and units in words, the way they were said:
+
+| Parakeet wrote | Transcript says |
+|---|---|
+| `$5`, `cost$25` | five dollars, cost twenty-five dollars |
+| `£25`, `25 lb` | twenty-five pounds |
+| `$5 million`, `$5m` | five million dollars |
+| `20°C`, `50%`, `21st` | twenty degrees Celsius, fifty percent, twenty-first |
+| `MP3`, `COVID-19`, `5m` | unchanged: names, or ambiguous |
+
+Different speech often comes out as the same text — `£2.10` is "two pounds
+ten", "two pounds and ten pence" or "two ten"; `1500` is "fifteen hundred" or
+"one thousand five hundred"; `911` is "nine one one" or "nine eleven" — so each
+number's possible readings are scored against its stretch of the audio by the
+word aligner, and the one that was said is kept. That needs the aligner model
+(it runs only for chunks containing such a number, adding roughly 2 s per 30 s
+chunk on CPU); with `PARAKEET_ALIGN_WORDS=false` or the model unavailable, the
+most common reading is used instead. Word times follow the spoken words.
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_SPOKEN_NUMBERS` | `false` | say numbers, money and units in English transcripts as spoken |
+
 ### Batch transcription
 
 `POST /v1/audio/transcriptions/batch` takes several `files=` parts in one

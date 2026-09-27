@@ -244,16 +244,46 @@ def _apply_alignment(
         word["end"] = min(max(word["end"], word["start"]), high)
 
 
-def _speak_numbers(words: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+def _choose_readings(
+    texts: List[str], options: List[List[str]], chunk: aligner.ChunkAligner
+) -> List[str]:
+    """Pick, by ear, which reading of each ambiguous word was said.
+
+    The default readings are aligned first to find each word's neighbours; each
+    ambiguous word is then heard between its neighbours' edges, so a wrong
+    default only costs its own slot.
+    """
+    choices = [said[0] for said in options]
+    spans = chunk.spans(spoken.spoken_words(texts)) or [None] * len(texts)
+    for index, said in enumerate(options):
+        if len(said) < 2:
+            continue
+        before = next((s[1] for s in reversed(spans[:index]) if s is not None), 0.0)
+        after = next((s[0] for s in spans[index + 1 :] if s is not None), float("inf"))
+        choices[index] = said[chunk.best(said, before, after)]
+    return choices
+
+
+def _speak_numbers(
+    words: List[Dict[str, Any]], chunk: Callable[[], Optional[aligner.ChunkAligner]]
+) -> Optional[List[Dict[str, Any]]]:
     """One chunk's words with numbers, money and units said out ("$5" -> "five
     dollars"), or None if nothing changed (PARAKEET_SPOKEN_NUMBERS).
 
-    A word that becomes several shares its time span out by length; when the
-    aligner runs next it re-times each of them from the audio.
+    Where the text allows several readings ("£2.10": "two pounds ten", "two
+    pounds and ten pence", ...) the audio decides, via `chunk()` (called only
+    then, as it loads the aligner); without it the first reading is used. A word
+    that becomes several shares its time span out by length; when the aligner
+    runs next it re-times each of them from the audio.
     """
-    said = spoken.spoken_words([w["word"] for w in words])
-    if said == [w["word"] for w in words]:
+    texts = [w["word"] for w in words]
+    options = [spoken.readings(text) for text in texts]
+    if all(said == [text] for said, text in zip(options, texts)):
         return None
+    choices: List[Optional[str]] = [said[0] for said in options]
+    if any(len(said) > 1 for said in options) and (heard := chunk()) is not None:
+        choices = _choose_readings(texts, options, heard)
+    said = spoken.spoken_words(texts, choices=choices)
     out: List[Dict[str, Any]] = []
     for index, (word, text) in enumerate(zip(words, said)):
         if text == word["word"]:
@@ -274,10 +304,17 @@ def _speak_numbers(words: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]
 def _stitch(
     prepared: _PreparedAudio,
     results: Sequence[Any],
-    align: Optional[Callable[[Any, List[str]], Optional[List[Optional[aligner.Span]]]]] = None,
     *,
+    align: bool = False,
     speak: bool = False,
+    language: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Chunk results -> (text, segments, words).
+
+    `align` re-times words with the forced aligner; `speak` says numbers out
+    (PARAKEET_SPOKEN_NUMBERS). Both may run the aligner's model, so a caller
+    setting either should call this off the event loop.
+    """
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
             f"inference returned {len(results)} results for "
@@ -341,15 +378,23 @@ def _stitch(
             word_end = min(chunk_end, max(word_start, word_end))
             chunk_words.append({"start": word_start, "end": word_end, "word": word})
 
-        if speak and (said := _speak_numbers(chunk_words)) is not None:
+        heard: List[Optional[aligner.ChunkAligner]] = []
+
+        def chunk(wav: Any = chunk_wav) -> Optional[aligner.ChunkAligner]:
+            """The chunk's aligner, made on first use (it loads the model) and shared."""
+            if not heard:
+                heard.append(aligner.for_chunk(wav, language))
+            return heard[0]
+
+        if speak and (said := _speak_numbers(chunk_words, chunk)) is not None:
             # Text and words are rewritten together so they always agree.
             chunk_words = said
             segments[-1]["segment"] = _clean_text(" ".join(w["word"] for w in chunk_words))
 
-        if align is not None and chunk_words:
+        if align and chunk_words and (timer := chunk()) is not None:
             _apply_alignment(
                 chunk_words,
-                align(chunk_wav, [w["word"] for w in chunk_words]),
+                timer.spans([w["word"] for w in chunk_words]),
                 chunk_start,
                 chunk_end,
             )
@@ -465,18 +510,17 @@ async def transcribe(
     infer_ms = (time.perf_counter() - infer_started) * 1000
 
     stitch_started = time.perf_counter()
-    if want_words and aligner.supports(language):
-        # Alignment runs a second ONNX model over the audio: keep it off the loop,
-        # and off the audio pool so it never holds up other requests' decoding.
+    align = want_words and aligner.supports(language)
+    stitch = functools.partial(_stitch, align=align, speak=speak, language=language)
+    if align or (speak and aligner.supports(language)):
+        # Aligning, or choosing a number's reading by ear, runs a second ONNX model
+        # over the audio: keep it off the loop, and off the audio pool so it never
+        # holds up other requests' decoding.
         full_text, segments, words = await asyncio.get_running_loop().run_in_executor(
-            request.app.state.align_pool,
-            functools.partial(_stitch, speak=speak),
-            prepared,
-            results,
-            functools.partial(aligner.align_words, language=language),
+            request.app.state.align_pool, stitch, prepared, results
         )
     else:
-        full_text, segments, words = _stitch(prepared, results, speak=speak)
+        full_text, segments, words = stitch(prepared, results)
     stitch_ms = (time.perf_counter() - stitch_started) * 1000
 
     logger.info(
@@ -587,18 +631,21 @@ async def transcribe_batch(
         raise HTTPException(status_code=503, detail="Model is not ready")
     flat_results = await worker.submit_many(flattened, model_name)
 
+    # The batch endpoint takes no `language`: the default decides.
+    speak = SPOKEN_NUMBERS and aligner.language_code(None) == "en"
+    stitch = functools.partial(_stitch, speak=speak)
     cursor = 0
     response_items = []
     for filename, prepared in zip(filenames, prepared_files):
         count = len(prepared.pieces)
         item_results = flat_results[cursor : cursor + count]
         cursor += count
-        text, _segments, _words = _stitch(
-            prepared,
-            item_results,
-            # the batch endpoint takes no `language`: the default decides
-            speak=SPOKEN_NUMBERS and aligner.language_code(None) == "en",
-        )
+        if speak and aligner.supports(None):  # may hear readings: off the loop
+            text, _segments, _words = await asyncio.get_running_loop().run_in_executor(
+                request.app.state.align_pool, stitch, prepared, item_results
+            )
+        else:
+            text, _segments, _words = stitch(prepared, item_results)
         response_items.append(
             {"filename": filename, "text": text, "duration": prepared.duration}
         )
