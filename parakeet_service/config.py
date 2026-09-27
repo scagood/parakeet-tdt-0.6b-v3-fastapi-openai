@@ -130,9 +130,12 @@ MODEL_CONFIGS = {
 # generated rather than spelled out — repo id, quant and family are formulaic.
 # Naming mirrors the parakeet split: bare name = fp32 default, -fp16 for GPU,
 # -int8 for CPU. English-only sizes carry the .en suffix in the size itself.
-# Still a sketch: onnx_asr's batched .recognize() and whisper timestamp output
-# are unverified, so the whisper-family handling in model.py/routes.py degrades
-# those loudly (30 s chunking, no word timestamps) rather than failing silently.
+# Verified on onnx_asr 0.12.0 (whisper-tiny, CPU): fp32/fp16/int8 all load and
+# transcribe, and batched .recognize([...]) returns a list (the GPU batch path
+# is safe). The standard repos return text only — no token timestamps — so the
+# whisper handling in model.py/routes.py yields text + 30 s-chunked coarse
+# segment times, no word timestamps. That is a correct result, not a stub; word
+# timestamps would come from forced alignment of the transcript (see #26).
 _WHISPER_SIZES = (
     "tiny", "tiny.en", "base", "base.en", "small", "small.en",
     "medium", "medium.en", "large-v3", "large-v3-turbo",
