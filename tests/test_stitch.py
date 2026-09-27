@@ -78,6 +78,19 @@ def test_second_chunk_words_use_chunk_offset():
     assert words[1]["start"] == 10.5
 
 
+def test_lone_word_marker_before_digits_and_currency_starts_a_word():
+    # Parakeet v3 tokens, verbatim: the marker comes alone before "£" and digits,
+    # and onnx_asr's text join has already dropped the space before the "£".
+    result = SimpleNamespace(
+        text="The coffee was£1.10 in 2005.",
+        tokens=[" The", " co", "ff", "ee", " was", " ", "£", "1", ".", "1", "0", " in", " ", "2", "0", "0", "5", "."],
+        timestamps=[0.1 * i for i in range(18)],
+    )
+    text, segments, words = routes._stitch(_prepared([(0.0, 5.0)]), [result])
+    assert [w["word"] for w in words] == ["The", "coffee", "was", "£1.10", "in", "2005."]
+    assert text == segments[0]["segment"] == "The coffee was £1.10 in 2005."
+
+
 class _FakeChunk:
     """Stands in for aligner.ChunkAligner: re-times word i to (0.25 + i, 0.5 + i)."""
 

@@ -57,6 +57,9 @@ def _clean_text(text: str) -> str:
         return ""
     text = text.replace("\u2581", " ").strip()
     text = re.sub(r"\s+", " ", text)
+    # onnx_asr drops the space before any non-word character, meaning to join
+    # punctuation, and so glues currency to the word before: "was\u00a31.10".
+    text = re.sub(r"(?<=[^\W\d_])(?=[$\u00a3\u20ac])", " ", text)
     return text.replace(" '", "'")
 
 
@@ -351,11 +354,15 @@ def _stitch(
 
         # Group BPE pieces into words: a piece starting with the word marker
         # ("\u2581" or a plain space, depending on export) opens a new word.
+        # Parakeet emits the marker as a token of its own before digits and
+        # currency signs (" was", " ", "\u00a3", "1"...): it opens the next piece's word.
         grouped: List[Tuple[str, float, float]] = []  # (word, first_ts, last_ts)
+        pending_break = False
         for token, timestamp in zip(info["tokens"], timestamps):
             piece = token.replace("\u2581", " ")
-            starts_word = piece.startswith(" ")
+            starts_word = pending_break or piece.startswith(" ")
             piece = piece.strip()
+            pending_break = starts_word and not piece
             if not piece:
                 continue
             if grouped and not starts_word:
