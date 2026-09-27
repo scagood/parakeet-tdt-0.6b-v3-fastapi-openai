@@ -64,6 +64,8 @@ _UNIT_WORDS = {
 # Scale abbreviations only count after a currency: "$5m" is five million
 # dollars, but a bare "5m" could be metres, so it keeps its letter.
 _SCALE_ABBREVIATIONS = {"k": "thousand", "m": "million", "bn": "billion"}
+# Hundredths said as a fraction: "10.5" is "ten and a half".
+_FRACTION_WORDS = {50: ["a half"], 25: ["a quarter", "a fourth"], 75: ["three quarters", "three fourths"]}
 # Minor currency after a small number: "50p", "99c", "99¢".
 _MINOR_SUFFIXES = {"p": "£", "c": "$", "¢": "$"}
 _TIME_SUFFIXES = {"am", "pm", "a.m.", "p.m."}
@@ -202,10 +204,12 @@ def _unique(items) -> list[str]:
 def _amounts(n: int) -> list[str]:
     """Ways to say n as a quantity, most likely first."""
     options = [_cardinal(n), _cardinal(n, british=True)]
+    if 1000 <= n < 10**6 and n % 1000 >= 100:  # "one thousand and five hundred"
+        options.append(f"{_cardinal(n // 1000)} thousand and {_cardinal(n % 1000, british=True)}")
     for said in list(options):
         if said.startswith("one "):  # "a hundred and fifty", "a thousand"
             options.append("a " + said[4:])
-    if 1100 <= n <= 9999 and (n // 100) % 10 and n < 10000:  # "fifteen hundred (and fifty)"
+    if 1100 <= n <= 9999 and (n // 100) % 10:  # "fifteen hundred (and fifty)"
         rest = n % 100
         hundreds = f"{_cardinal(n // 100)} hundred"
         options += [hundreds] if rest == 0 else [f"{hundreds} {_cardinal(rest)}", f"{hundreds} and {_cardinal(rest)}"]
@@ -245,9 +249,9 @@ def _money(groups: Sequence[Optional[str]], integer: list[str]) -> list[str]:
     singular, plural, minor_one, minor_many = _CURRENCIES[currency]
     major = int(digits.replace(",", ""))
     bare = integer  # said with no unit after it: never just "a"
-    if major == 1:
-        integer = [*integer, "a"]  # "a dollar fifty", "a quid"
     fraction = (decimals or ".")[1:]
+    if major == 1 and (not fraction or len(fraction) == 2):
+        integer = [*integer, "a"]  # "a dollar fifty", "a quid", never "a point five"
     scale = _SCALE_ABBREVIATIONS.get((suffix or "").lower())
     if len(fraction) == 2 and not scale:
         cents = int(fraction)
@@ -275,6 +279,8 @@ def _money(groups: Sequence[Optional[str]], integer: list[str]) -> list[str]:
     unit = singular if major == 1 and not fraction and not scale else plural
     scale_word = f" {scale}" if scale else ""
     options = [f"{said}{point}{scale_word} {unit}" for said in integer]
+    for part in _FRACTION_WORDS.get(int(fraction.ljust(2, "0")[:2]) if 0 < len(fraction) <= 2 else -1, []):
+        options += [f"{said} and {part}{scale_word} {plural}" for said in integer]  # "one and a half million"
     if not fraction and not scale:
         slang = {"£": ("quid", "quid"), "$": ("buck", "bucks")}.get(currency)
         if slang:  # "fifty quid", "five bucks"
@@ -289,6 +295,11 @@ def _readings(groups: Sequence[Optional[str]], *, strict: bool) -> list[str]:
     sign, currency, digits, decimals, ordinal, suffix = groups
     suffix = (suffix or "").lower()
     plain = digits.replace(",", "")
+    if suffix in _MINOR_SUFFIXES and currency and decimals:
+        # "£11.40p": the pence were said ("eleven pounds forty p"); the money
+        # readings already include that form.
+        suffix = ""
+        groups = (sign, currency, digits, decimals, ordinal, "")
     if suffix in _MINOR_SUFFIXES and not currency and not decimals:
         if int(plain) >= 100 and suffix != "¢":
             return [] if strict else [f"{_cardinal(int(plain))} {suffix}"]  # "1080p"
@@ -324,8 +335,7 @@ def _readings(groups: Sequence[Optional[str]], *, strict: bool) -> list[str]:
                 heads = ["zero", "nought", "oh", ""]  # "point five"
             options = [f"{head} {tail}".strip() for head in heads for tail in tails]
             hundredths = int(fraction.ljust(2, "0")[:2]) if len(fraction) <= 2 else None
-            parts = {50: ["a half"], 25: ["a quarter", "a fourth"], 75: ["three quarters", "three fourths"]}
-            for part in parts.get(hundredths, []):  # "ten and a half"
+            for part in _FRACTION_WORDS.get(hundredths, []):  # "ten and a half"
                 options += [f"{head} and {part}" if int(plain) else part for head in heads]
             if len(fraction) == 2 and int(plain):  # "2.50": "two fifty", "1.05": "one oh five"
                 said = f"{'oh ' if fraction[0] == '0' else ''}{_cardinal(int(fraction))}"

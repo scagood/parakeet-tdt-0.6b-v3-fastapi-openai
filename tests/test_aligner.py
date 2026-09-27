@@ -102,7 +102,7 @@ def test_word_spans_return_none_for_audio_without_frames():
         ("mid-2020s", "MID TWENTY TWENTIES"),
         ("50%", "FIFTY PERCENT"),
         ("007", "ZERO ZERO SEVEN"),
-        ("R&D", "R AND D"),
+        ("R&D", "AR AND DEE"),  # lone letters are said as their names
         ("20lb", "TWENTY POUNDS"),
         ("1lb", "ONE POUND"),
         ("5kg", "FIVE KILOGRAMS"),
@@ -112,8 +112,8 @@ def test_word_spans_return_none_for_audio_without_frames():
         ("$5.5m", "FIVE POINT FIVE MILLION DOLLARS"),
         ("£5bn", "FIVE BILLION POUNDS"),
         ("$20k", "TWENTY THOUSAND DOLLARS"),
-        ("5k", "FIVE K"),  # a race, not money
-        ("5m", "FIVE M"),  # metres or million: left as written
+        ("5k", "FIVE KAY"),  # a race, not money
+        ("5m", "FIVE EM"),  # metres or million: left as written
         ("5kb", "FIVE KB"),  # not a known unit
     ],
 )

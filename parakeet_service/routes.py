@@ -263,8 +263,19 @@ def _choose_readings(
             continue
         before = next((s[1] for s in reversed(spans[:index]) if s is not None), 0.0)
         after = next((s[0] for s in spans[index + 1 :] if s is not None), float("inf"))
-        choices[index] = said[chunk.best(said, before, after)]
+        choice = said[chunk.best(said, before, after)]
+        # Speakers mix their zeros within one number ("nine zero oh one"): try
+        # each zero the other ways too, one at a time.
+        tokens = choice.split()
+        for slot, token in enumerate(tokens):
+            if token in _ZERO_WORDS:
+                ways = [" ".join([*tokens[:slot], zero, *tokens[slot + 1 :]]) for zero in _ZERO_WORDS]
+                tokens = ways[chunk.best(ways, before, after)].split()
+        choices[index] = " ".join(tokens)
     return choices
+
+
+_ZERO_WORDS = ("zero", "oh", "nought")
 
 
 def _speak_numbers(

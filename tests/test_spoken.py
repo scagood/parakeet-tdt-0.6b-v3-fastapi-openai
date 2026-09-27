@@ -93,6 +93,8 @@ def test_every_known_way_of_saying_it_is_a_reading(written, said):
         ("2-1", "two one"), ("108-99", "one hundred and eight to ninety nine"),
         ("555-1234", "five five five one two three four"), ("3.12", "three point twelve"),
         ("0.05", "zero point zero five"), ("64,", "six four"),
+        ("£11.40p", "eleven pounds forty p"), ("1500", "one thousand and five hundred"),
+        ("£1.5", "one and a half pounds"), ("0.5", "nought point five"),
     ],
 )
 def test_what_parakeet_writes_can_be_heard_as_what_was_said(written, said):
@@ -194,6 +196,31 @@ def test_the_audio_picks_the_reading_that_was_said(monkeypatch):
     assert text == "That'll be two pounds and ten pence please."
     # heard between its neighbours' edges: "be" ends at 2.5, "please." starts at 3.0
     assert ear.windows == [(1.5, 3.0)]
+
+
+def test_each_zero_is_heard_on_its_own(monkeypatch):
+    class ZeroEar(_Ear):
+        """Hears "oh seven seven zero zero nine zero oh one two three": each
+        option is scored by how many of its words match, position by position."""
+
+        said = "oh seven seven zero zero nine zero oh one two three".split()
+
+        def best(self, options, start, end):
+            scores = [sum(a == b for a, b in zip(option.split(), self.said)) for option in options]
+            return scores.index(max(scores))
+
+    ear = ZeroEar()
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    text = routes._stitch(_prepared(), [_result("Call me on 07700900123.")], speak=True)[0]
+    assert text == "Call me on oh seven seven zero zero nine zero oh one two three."
+
+
+def test_a_lone_letter_is_aligned_as_its_name():
+    from parakeet_service import aligner
+
+    assert aligner._letters("ten p") == "TEN PEE"
+    assert aligner._letters("nought point five") == "NAWT POINT FIVE"
+    assert aligner._letters("I have a plan B.") == "I HAVE A PLAN BEE"
 
 
 def test_without_audio_the_first_reading_is_used(monkeypatch):

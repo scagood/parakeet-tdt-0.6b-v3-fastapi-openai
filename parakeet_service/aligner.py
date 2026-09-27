@@ -31,15 +31,23 @@ Span = tuple[float, float]
 # --------------------------------------------------------------------------- #
 _SYMBOLS = {"%": " PERCENT", "&": " AND ", "+": " PLUS ", "@": " AT "}
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
+# Words whose letters don't sound like them to a character model: a lone letter
+# is said as its name ("ten p" is "ten pee", "Plan B" is "plan bee").
+_SAID_AS = {
+    "NOUGHT": "NAWT",
+    **dict(zip("BCDEFGHJKLMNPQRSTUVWXYZ", "BEE SEE DEE EE EF JEE AYCH JAY KAY EL EM EN PEE KYOO AR ES TEE YOU VEE DOUBLEYOU EX WHY ZEE".split())),
+}
 
 
 def _letters(text: str) -> str:
     """Spoken text as the aligner's letters: symbols said, accents folded (café ->
-    CAFE), hyphens as word breaks; other punctuation is dropped by the vocab."""
+    CAFE), hyphens as word breaks, lone letters as their names; other punctuation
+    is dropped by the vocab."""
     for symbol, said in _SYMBOLS.items():
         text = text.replace(symbol, said)
     text = unicodedata.normalize("NFKD", text.upper().replace("-", " "))
-    return "".join(c for c in text if not unicodedata.combining(c))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(_SAID_AS.get(token.strip(".,!?;:\"'()"), token) for token in text.split())
 
 
 def _spoken_english(word: str) -> str:
@@ -100,6 +108,12 @@ _CONTEXT = 2 * TARGET_SR
 # word still moves a neighbour >100 ms in 2/45 runs at 0.5 (5/45 at 1.0, 9/45
 # at 2.0), while 0.25 starts taking frames from correct words.
 _STAR_PENALTY = 0.5
+# Choosing between readings of a number needs the opposite trade-off: with a
+# cheap star the shortest reading wins ("ten p" over "and ten pence" that was
+# said), so there the star costs more. Measured on a 246-clip TTS benchmark of
+# alternative readings (3 voices, real Parakeet v3 transcripts): 230 right at
+# 0.5, 235 at 1.0, 236 at 2.0-5.0; 3.0 sits mid-plateau.
+_CHOICE_STAR_PENALTY = 3.0
 _NEG_INF = -1e30
 # A failed load (no network, no cached model) is retried after this long.
 _RETRY_SEC = 300.0
@@ -258,8 +272,10 @@ def _star_path(
     *,
     blank: int,
     separator: Optional[int],
+    penalty: Optional[float] = None,
 ) -> Optional[tuple[list[tuple[int, int, int]], float]]:
-    """Force-align spoken words between "star" separators.
+    """Force-align spoken words between "star" separators (`penalty`: per frame
+    the star takes, default _STAR_PENALTY).
 
     Returns (owner, first frame, end frame) per character, frames counted in
     `emission`, and the path's total log-prob; None if the audio cannot hold it.
@@ -267,7 +283,7 @@ def _star_path(
     if not spoken or emission.shape[0] == 0:  # no text, or audio too short for a frame
         return None
     star = emission.shape[1]
-    anything = emission.max(axis=1) - _STAR_PENALTY
+    anything = emission.max(axis=1) - (_STAR_PENALTY if penalty is None else penalty)
     column = anything if separator is None else np.maximum(emission[:, separator], anything)
     emission = np.concatenate([emission, column[:, None]], axis=1)
     # The edge stars must each take a frame; give them a free one either side so
@@ -381,7 +397,11 @@ class ChunkAligner:
             scores = []
             for option in options:
                 path = _star_path(
-                    window, self._spoken([option]), blank=self._blank, separator=self._separator
+                    window,
+                    self._spoken([option]),
+                    blank=self._blank,
+                    separator=self._separator,
+                    penalty=_CHOICE_STAR_PENALTY,
                 )
                 scores.append(_NEG_INF if path is None else path[1])
             return int(np.argmax(scores)) if max(scores) > _NEG_INF else 0
