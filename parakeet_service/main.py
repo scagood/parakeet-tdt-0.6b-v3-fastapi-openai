@@ -67,6 +67,10 @@ async def lifespan(app: FastAPI):
     app.state.audio_pool = ThreadPoolExecutor(
         max_workers=AUDIO_WORKERS, thread_name_prefix="audio"
     )
+    # ponytail: one word alignment at a time, each on ALIGN_THREADS CPU threads,
+    # so it can't starve decoding or Parakeet. Concurrent word requests queue
+    # here; add a worker-count knob if word-request throughput matters.
+    app.state.align_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="align")
     try:
         logger.info("Lifespan startup: loading default model")
         await asyncio.to_thread(load_model)
@@ -83,6 +87,7 @@ async def lifespan(app: FastAPI):
         if app.state.worker is not None:
             await app.state.worker.stop()
         await asyncio.to_thread(_shutdown_pool, app.state.audio_pool)
+        await asyncio.to_thread(_shutdown_pool, app.state.align_pool)
 
 
 def create_app() -> FastAPI:

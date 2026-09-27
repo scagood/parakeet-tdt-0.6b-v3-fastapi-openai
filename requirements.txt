@@ -1,4 +1,6 @@
 onnx-asr[hub]>=0.10.0
+# Used directly by the word aligner (aligner.py), not only through onnx-asr[hub].
+huggingface-hub>=0.20.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9

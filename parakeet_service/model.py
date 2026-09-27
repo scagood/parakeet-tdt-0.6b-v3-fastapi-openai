@@ -63,14 +63,18 @@ def _preload_cuda_libraries() -> bool:
             return False
 
 
-def _build_sess_options() -> ort.SessionOptions:
+def _build_sess_options(
+    intra_threads: int = ORT_INTRA_THREADS, spinning: bool = True
+) -> ort.SessionOptions:
     options = ort.SessionOptions()
-    options.intra_op_num_threads = ORT_INTRA_THREADS
+    options.intra_op_num_threads = intra_threads
     options.inter_op_num_threads = ORT_INTER_THREADS
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     options.add_session_config_entry("session.set_denormal_as_zero", "1")
-    options.add_session_config_entry("session.intra_op.allow_spinning", "1")
+    options.add_session_config_entry(
+        "session.intra_op.allow_spinning", "1" if spinning else "0"
+    )
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
     return options
 
