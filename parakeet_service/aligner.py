@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import json
 import re
+import string
 import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Container, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
 
+from . import spoken
 from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, TARGET_SR, logger
 from .model import _build_sess_options
 
@@ -25,174 +27,56 @@ Span = tuple[float, float]
 
 # --------------------------------------------------------------------------- #
 # English text -> the characters wav2vec2-base-960h was trained on (A-Z, ').
-# Parakeet writes numbers and symbols; the aligner needs them as spoken words.
+# Parakeet writes numbers and symbols; spoken.py says them out, then this maps
+# the result onto the model's alphabet.
 # --------------------------------------------------------------------------- #
-_ONES = (
-    "ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE THIRTEEN "
-    "FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN"
-).split()
-_TENS = "_ _ TWENTY THIRTY FORTY FIFTY SIXTY SEVENTY EIGHTY NINETY".split()
-_SCALES = ((10**12, "TRILLION"), (10**9, "BILLION"), (10**6, "MILLION"), (1000, "THOUSAND"))
-_SCALE_WORDS = {"HUNDRED", "THOUSAND", "MILLION", "BILLION", "TRILLION"}
-_ORDINALS = {
-    "ONE": "FIRST", "TWO": "SECOND", "THREE": "THIRD", "FIVE": "FIFTH",
-    "EIGHT": "EIGHTH", "NINE": "NINTH", "TWELVE": "TWELFTH",
-}
-_CURRENCIES = {"$": "DOLLAR", "£": "POUND", "€": "EURO"}
-_UNITS = {unit + plural for unit in _CURRENCIES.values() for plural in ("", "S")}
 _SYMBOLS = {"%": " PERCENT", "&": " AND ", "+": " PLUS ", "@": " AT "}
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
-# Unit abbreviations after a number, as (singular, plural) spoken words. What
-# matters for timing is the sound: "£25", "25 lb" and "25lb" are all "twenty
-# five pounds", and ASR often writes money as weight or the other way round.
-_POUNDS = ("POUND", "POUNDS")
-_KM_PER_HOUR = ("KILOMETER PER HOUR", "KILOMETERS PER HOUR")
-_UNIT_WORDS = {
-    "lb": _POUNDS, "lbs": _POUNDS,
-    "oz": ("OUNCE", "OUNCES"),
-    "kg": ("KILOGRAM", "KILOGRAMS"), "kgs": ("KILOGRAM", "KILOGRAMS"),
-    "km": ("KILOMETER", "KILOMETERS"),
-    "cm": ("CENTIMETER", "CENTIMETERS"),
-    "mm": ("MILLIMETER", "MILLIMETERS"),
-    "ml": ("MILLILITER", "MILLILITERS"),
-    "ft": ("FOOT", "FEET"),
-    "mph": ("MILE PER HOUR", "MILES PER HOUR"),
-    "kph": _KM_PER_HOUR, "km/h": _KM_PER_HOUR,
-    "hr": ("HOUR", "HOURS"), "hrs": ("HOUR", "HOURS"),
-    "min": ("MINUTE", "MINUTES"), "mins": ("MINUTE", "MINUTES"),
-    "°c": ("DEGREE CELSIUS", "DEGREES CELSIUS"),
-    "°f": ("DEGREE FAHRENHEIT", "DEGREES FAHRENHEIT"),
-    "°": ("DEGREE", "DEGREES"),
+# Words whose letters don't sound like them to a character model: a lone letter
+# is said as its name ("ten p" is "ten pee", "Plan B" is "plan bee").
+_SAID_AS = {
+    "NOUGHT": "NAWT",
+    **dict(zip(
+        "BCDEFGHJKLMNPQRSTUVWXYZ",
+        "BEE SEE DEE EE EF JEE AYCH JAY KAY EL EM EN PEE KYOO AR ES TEE YOU VEE DOUBLEYOU EX WHY ZEE".split(),
+    )),
 }
-# Scale abbreviations only count after a currency: "$5m" is five million
-# dollars, but a bare "5m" could be metres, so it keeps its letter.
-_SCALE_ABBREVIATIONS = {"k": "THOUSAND", "m": "MILLION", "bn": "BILLION"}
-_SUFFIXES = "|".join(
-    re.escape(s) for s in sorted({*_UNIT_WORDS, *_SCALE_ABBREVIATIONS}, key=len, reverse=True)
-)
-# A leading minus counts only at the start of a word: "mid-2020s" is not negative.
-_NUMBER = re.compile(
-    r"(?:(?<!\w)(-))?([$£€])?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(st|nd|rd|th)?"
-    rf"(?:({_SUFFIXES})(?![a-z]))?",
-    re.IGNORECASE,
-)
-_TRAILING_PUNCTUATION = re.compile(r"[.,!?;:]+$")
+# Letter names that depend on the speaker: the audio picks ("zee" or "zed").
+# The transcript keeps the letter either way; only its timing listens for both.
+_ACCENTS = {"ZEE": "ZED", "AYCH": "HAYCH"}
 
 
-def _cardinal(n: int) -> str:
-    if n < 20:
-        return _ONES[n]
-    if n < 100:
-        return _TENS[n // 10] + ("" if n % 10 == 0 else " " + _ONES[n % 10])
-    if n < 1000:
-        rest = "" if n % 100 == 0 else " " + _cardinal(n % 100)
-        return f"{_ONES[n // 100]} HUNDRED{rest}"
-    for scale, name in _SCALES:
-        if n >= scale:
-            head, rest = divmod(n, scale)
-            return f"{_cardinal(head)} {name}" + ("" if rest == 0 else " " + _cardinal(rest))
-    raise AssertionError("unreachable")
-
-
-def _year(n: int) -> str:
-    # 1999 -> NINETEEN NINETY NINE, 1905 -> NINETEEN OH FIVE, 1900 -> NINETEEN HUNDRED
-    head, tail = divmod(n, 100)
-    if tail == 0:
-        return f"{_cardinal(head)} HUNDRED"
-    return f"{_cardinal(head)} {'OH ' if tail < 10 else ''}{_cardinal(tail)}"
-
-
-def _ordinal(words: str) -> str:
-    head, _, last = words.rpartition(" ")
-    if last in _ORDINALS:
-        last = _ORDINALS[last]
-    elif last.endswith("Y"):
-        last = last[:-1] + "IETH"
-    else:
-        last += "TH"
-    return f"{head} {last}".strip()
-
-
-def _digits(digits: str) -> str:
-    return " ".join(_ONES[int(d)] for d in digits)
-
-
-def _unit(key: str, count: str) -> str:
-    singular, plural = _UNIT_WORDS[key]
-    return singular if count == "1" else plural
-
-
-def _say_number(match: re.Match) -> str:
-    sign, currency, digits, decimals, ordinal, suffix = match.groups()
-    suffix = (suffix or "").lower()
-    scale = _SCALE_ABBREVIATIONS.get(suffix) if currency else None
-    plain = digits.replace(",", "")
-    if len(plain) > 15 or ("," not in digits and plain.startswith("0") and len(plain) > 1):
-        # Codes, IDs and phone numbers are read digit by digit.
-        spoken = _digits(plain)
-    elif len(digits) == 4 and not (currency or ordinal or decimals) and (
-        1100 <= int(plain) <= 1999 or 2010 <= int(plain) <= 2099
-    ):
-        # ponytail: 4-digit numbers in year range read as years ("twenty twenty
-        # six"). A count said "one thousand five hundred" then starts ~160 ms
-        # late (measured). Needs context to tell a year from a count.
-        spoken = _year(int(plain))
-    else:
-        spoken = _cardinal(int(plain))
-    if ordinal:
-        spoken = _ordinal(spoken)
-    fraction = (decimals or ".")[1:]
-    if fraction and not (currency and len(fraction) == 2 and not scale):
-        # "$2.5 million" is "two point five million dollars"; only 2 digits are cents
-        spoken += " POINT " + _digits(fraction)
-        fraction = ""
-    if scale:
-        spoken += " " + scale
-    if currency:
-        unit = _CURRENCIES[currency] + ("" if plain == "1" and not decimals and not scale else "S")
-        spoken = f"{spoken} {unit}" + (f" {_cardinal(int(fraction))}" if fraction.strip("0") else "")
-    if suffix in _UNIT_WORDS:
-        spoken += " " + _unit(suffix, digits if not decimals else "")
-    elif suffix and not scale:
-        spoken += " " + suffix.upper()  # "5m", "5k": left as written
-    if sign:
-        spoken = "MINUS " + spoken
-    return f" {spoken} "
-
-
-def _spoken_english(word: str) -> str:
-    """One Parakeet word as spoken English letters, spaces between spoken words.
-
-    Numbers, currency and symbols are said out; accents are folded (café ->
-    CAFE); remaining punctuation is dropped by the caller's vocab filter.
-    """
-    text = _NUMBER.sub(_say_number, word.translate(_APOSTROPHES))
-    for symbol, spoken in _SYMBOLS.items():
-        text = text.replace(symbol, spoken)
-    text = unicodedata.normalize("NFKD", text.upper())
-    return "".join(c for c in text if not unicodedata.combining(c))
+def _letters(text: str) -> str:
+    """Spoken text as the aligner's letters: symbols said, accents folded (café ->
+    CAFE), hyphens as word breaks, lone letters as their names; other punctuation
+    is dropped by the vocab."""
+    for symbol, said in _SYMBOLS.items():
+        text = text.replace(symbol, said)
+    text = unicodedata.normalize("NFKD", text.upper().replace("-", " "))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(_SAID_AS.get(token.strip(".,!?;:\"'()"), token) for token in text.split())
 
 
 def _normalize_english(words: Sequence[str]) -> list[str]:
     """Spoken letters for each of `words`, in the order they are said."""
-    spoken = [_spoken_english(word).split() for word in words]
-    # A unit written as its own word after a number: "25 lb" is "twenty five pounds".
-    for index in range(1, len(words)):
-        key = _TRAILING_PUNCTUATION.sub("", words[index]).lower()
-        previous = _TRAILING_PUNCTUATION.sub("", words[index - 1])
-        if key in _UNIT_WORDS and any(c.isdigit() for c in previous):
-            spoken[index] = _unit(key, previous).split()
-    # "$5 million" is said "five million dollars": the unit follows the scale word.
-    for current, following in zip(spoken, spoken[1:]):
-        if (
-            len(current) > 1
-            and current[-1] in _UNITS
-            and following
-            and re.sub(r"[^A-Z]", "", following[0]) in _SCALE_WORDS
-        ):
-            unit = current.pop()
-            following.insert(1, unit if unit.endswith("S") else unit + "S")
-    return [" ".join(parts) for parts in spoken]
+    said = spoken.spoken_words([word.translate(_APOSTROPHES) for word in words], everywhere=True)
+    return [_letters(text) for text in said]
+
+
+def _mostly_unknown(words: Sequence[str], said: Sequence[str], known: Container[str]) -> bool:
+    """Whether most of `words` that have letters have none in `known` once
+    said (`said`, one text per word): Cyrillic, Greek, ... in a model of Latin
+    letters. That is not its language, and forcing it would be worse than
+    leaving the words alone."""
+    lettered = [text for word, text in zip(words, said) if any(c.isalpha() for c in word)]
+    return 2 * sum(not any(c in known for c in text) for text in lettered) > len(lettered)
+
+
+def other_alphabet(words: Sequence[str]) -> bool:
+    """Whether `words` are mostly in an alphabet English is not written in, by
+    the rule the aligner uses to leave them untimed (spoken numbers leave them
+    as written too). Accents are folded first: "café" is Latin."""
+    return _mostly_unknown(words, [_letters(word) for word in words], string.ascii_uppercase)
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +126,12 @@ _CONTEXT = 2 * TARGET_SR
 # word still moves a neighbour >100 ms in 2/45 runs at 0.5 (5/45 at 1.0, 9/45
 # at 2.0), while 0.25 starts taking frames from correct words.
 _STAR_PENALTY = 0.5
+# Choosing between readings of a number needs the opposite trade-off: with a
+# cheap star the shortest reading wins ("ten p" over "and ten pence" that was
+# said), so there the star costs more. Measured on a 246-clip TTS benchmark of
+# alternative readings (3 voices, real Parakeet v3 transcripts): 230 right at
+# 0.5, 235 at 1.0, 236 at 2.0-5.0; 3.0 sits mid-plateau.
+_CHOICE_STAR_PENALTY = 3.0
 _NEG_INF = -1e30
 # A failed load (no network, no cached model) is retried after this long.
 _RETRY_SEC = 300.0
@@ -251,7 +141,7 @@ _loaded: dict[str, tuple[Any, dict[str, int]]] = {}
 _failed_at: dict[str, float] = {}
 
 
-def _language(language: Optional[str]) -> str:
+def language_code(language: Optional[str]) -> str:
     """ISO 639-1 code for a request's `language` ("en-US", "English" -> "en")."""
     code = (language or "").strip().lower()
     if code in ("", "auto"):
@@ -261,7 +151,7 @@ def _language(language: Optional[str]) -> str:
 
 
 def supports(language: Optional[str]) -> bool:
-    return _language(language) in ALIGN_MODELS
+    return language_code(language) in ALIGN_MODELS
 
 
 def status() -> dict[str, str]:
@@ -290,7 +180,7 @@ def _load(language: str) -> Optional[tuple[Any, dict[str, int]]]:
             # per 30 s of audio to tens of ms on GPU hosts; untested, so not wired.
             session = ort.InferenceSession(
                 fetch(spec.onnx),
-                # Only word requests use it, so don't leave threads spinning between calls.
+                # Only word and spoken-number requests use it: no threads spinning between calls.
                 sess_options=_build_sess_options(ALIGN_THREADS, spinning=False),
                 providers=["CPUExecutionProvider"],
             )
@@ -336,17 +226,17 @@ def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return stacked, np.concatenate(starts) / TARGET_SR
 
 
-def forced_align(
+def _viterbi(
     emission: np.ndarray, targets: Sequence[int], *, blank: int
-) -> Optional[list[tuple[int, int]]]:
+) -> Optional[tuple[list[tuple[int, int]], float]]:
     """Viterbi path of `targets` through CTC log-probs `emission` (T, V).
 
-    Returns one (start_frame, end_frame_exclusive) per target, or None when the
-    audio has too few frames to hold the targets.
+    Returns one (start_frame, end_frame_exclusive) per target and the path's
+    total log-prob, or None when the audio has too few frames to hold the targets.
     """
     n = len(targets)
     if n == 0:
-        return []
+        return [], 0.0
     repeats = sum(a == b for a, b in zip(targets, targets[1:]))
     frames = emission.shape[0]
     if frames < n + repeats:  # repeats need a blank between them
@@ -370,6 +260,7 @@ def forced_align(
         back[t] = choice = options.argmax(axis=0)
         score = options[choice, columns] + emit[t]
 
+    best = score[-1] if score[-1] >= score[-2] else score[-2]
     state = width - 1 if score[-1] >= score[-2] else width - 2
     path = np.empty(frames, dtype=np.int64)
     for t in range(frames - 1, -1, -1):
@@ -380,7 +271,45 @@ def forced_align(
     for index in range(n):
         hits = np.flatnonzero(path == 2 * index + 1)
         spans.append((int(hits[0]), int(hits[-1]) + 1))
-    return spans
+    return spans, float(best)
+
+
+def _star_path(
+    emission: np.ndarray,
+    spoken: Sequence[tuple[int, Sequence[int]]],
+    *,
+    blank: int,
+    separator: Optional[int],
+    penalty: Optional[float] = None,
+) -> Optional[tuple[list[tuple[int, int, int]], float]]:
+    """Force-align spoken words between "star" separators (`penalty`: per frame
+    the star takes, default _STAR_PENALTY).
+
+    Returns (owner, first frame, end frame) per character, frames counted in
+    `emission`, and the path's total log-prob; None if the audio cannot hold it.
+    """
+    if not spoken or emission.shape[0] == 0:  # no text, or audio too short for a frame
+        return None
+    star = emission.shape[1]
+    anything = emission.max(axis=1) - (_STAR_PENALTY if penalty is None else penalty)
+    column = anything if separator is None else np.maximum(emission[:, separator], anything)
+    emission = np.concatenate([emission, column[:, None]], axis=1)
+    # The edge stars must each take a frame; give them a free one either side so
+    # speech starting on the first frame keeps it.
+    pad = np.full((1, emission.shape[1]), _NEG_INF)
+    pad[0, star] = 0.0
+    emission = np.concatenate([pad, emission, pad])
+
+    targets, owners = [star], [-1]
+    for owner, ids in spoken:
+        targets.extend([*ids, star])
+        owners.extend([owner] * len(ids) + [-1])
+    path = _viterbi(emission, targets, blank=blank)
+    if path is None:
+        return None
+    spans, score = path
+    # -1: the leading pad frame shifts every real frame by one
+    return [(owner, first - 1, last - 1) for (first, last), owner in zip(spans, owners) if owner >= 0], score
 
 
 def word_spans(
@@ -397,79 +326,135 @@ def word_spans(
     `spoken` holds (word index, character ids) in order; a word may appear more
     than once ("2026" is said as three words). Words absent from it get None.
     """
-    if not spoken or emission.shape[0] == 0:  # no text, or audio too short for a frame
+    path = _star_path(emission, spoken, blank=blank, separator=separator)
+    if path is None:
         return None
-    star = emission.shape[1]
-    anything = emission.max(axis=1) - _STAR_PENALTY
-    column = anything if separator is None else np.maximum(emission[:, separator], anything)
-    emission = np.concatenate([emission, column[:, None]], axis=1)
-    # The edge stars must each take a frame; give them a free one either side so
-    # speech starting on the first frame keeps it.
-    pad = np.full((1, emission.shape[1]), _NEG_INF)
-    pad[0, star] = 0.0
-    emission = np.concatenate([pad, emission, pad])
-
-    targets, owners = [star], [-1]
-    for owner, ids in spoken:
-        targets.extend([*ids, star])
-        owners.extend([owner] * len(ids) + [-1])
-    spans = forced_align(emission, targets, blank=blank)
-    if spans is None:
-        return None
-
     frame_sec = _STRIDE / TARGET_SR
     words: list[Optional[Span]] = [None] * n_words
-    for (first, last), owner in zip(spans, owners):
-        if owner < 0:
-            continue
-        # -1: the leading pad frame shifts every real frame by one
-        start = float(frame_starts[first - 1])
-        end = float(frame_starts[last - 2]) + frame_sec
+    for owner, first, last in path[0]:
+        start, end = float(frame_starts[first]), float(frame_starts[last - 1]) + frame_sec
         current = words[owner]
         words[owner] = (start, end) if current is None else (current[0], end)
     return words
 
 
-def align_words(
-    wav: np.ndarray, words: Sequence[str], language: Optional[str] = None
-) -> Optional[list[Optional[Span]]]:
-    """(start, end) seconds from the start of `wav` for each of `words`.
+class ChunkAligner:
+    """One chunk's audio, ready to time its words or to hear which of several
+    readings of a word was said. The wav2vec2 pass runs once, on first use,
+    and a failed one is not retried.
 
-    A word with no characters the model knows gets None. Returns None outright
-    when no aligner is available, the text is not in the model's alphabet, or
-    the audio cannot hold the text, so the caller keeps its own times.
+    Everything here refines a finished transcript: failures are logged and
+    answered with "don't know" (None, or the first reading), never raised.
     """
-    code = _language(language)
+
+    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], normalize):
+        self._wav = wav
+        self._session = session
+        self._vocab = vocab
+        self._normalize = normalize
+        self._blank = vocab.get("<pad>", 0)
+        self._separator = vocab.get("|")
+        self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
+
+    def _emission(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._frames is None:
+            try:
+                self._frames = _emission(self._session, self._wav)
+            except Exception:
+                # Once per chunk, not once per question: with no frames, every
+                # later span or score of this chunk is "don't know".
+                logger.exception("wav2vec2 pass failed; keeping model word times and default readings")
+                self._frames = np.empty((0, 0)), np.empty(0)
+        return self._frames
+
+    def _spoken(self, said: Sequence[str]) -> list[tuple[int, list[int]]]:
+        """(word index, character ids) for each spoken part of each word's `said` text."""
+        spoken: list[tuple[int, list[int]]] = []
+        for index, text in enumerate(said):
+            for part in text.split():
+                if ids := [self._vocab[c] for c in part if c in self._vocab]:
+                    spoken.append((index, ids))
+        return spoken
+
+    def spans(self, words: Sequence[str]) -> Optional[list[Optional[Span]]]:
+        """(start, end) seconds from the chunk start for each of `words`.
+
+        A word with no characters the model knows gets None. None outright when
+        the text is not in the model's alphabet or the audio cannot hold it.
+        """
+        try:
+            said = self._normalize(words)
+            spoken = self._spoken(said)
+            if not spoken or _mostly_unknown(words, said, self._vocab):
+                return None
+            emission, frame_starts = self._emission()
+            timed = word_spans(
+                emission, frame_starts, spoken, len(words), blank=self._blank, separator=self._separator
+            )
+            if timed and (accented := self._accented(said, timed)) != said:
+                timed = word_spans(
+                    emission, frame_starts, self._spoken(accented), len(words),
+                    blank=self._blank, separator=self._separator,
+                )
+            return timed
+        except Exception:
+            logger.exception("word alignment failed; keeping model word times")
+            return None
+
+    def _accented(self, said: Sequence[str], timed: Sequence[Optional[Span]]) -> list[str]:
+        """`said` with each lone letter named the way the audio says it ("zee" or
+        "zed"), heard between the words either side of it."""
+        said = list(said)
+        for index, text in enumerate(said):
+            other = " ".join(_ACCENTS.get(part, part) for part in text.split())
+            if other == text or timed[index] is None:
+                continue
+            start = max((span[1] for span in timed[:index] if span), default=0.0)
+            end = min((span[0] for span in timed[index + 1 :] if span), default=float("inf"))
+            default, accent = self.scores([text, other], start, end)
+            said[index] = other if accent > default else text
+        return said
+
+    def scores(self, options: Sequence[str], start: float, end: float) -> list[float]:
+        """How well each reading in `options` matches the audio between `start`
+        and `end` seconds: its best path's log-prob, -inf where it does not fit
+        (all -inf if it cannot tell).
+
+        Every reading is scored over the same frames, with the star states on
+        either side: a reading that leaves out a spoken word pays for the audio
+        it cannot explain, one that adds a word has to find letters for it.
+        """
+        try:
+            emission, frame_starts = self._emission()
+            window = emission[(frame_starts >= start) & (frame_starts < end)]
+            scores = []
+            for option in options:
+                path = _star_path(
+                    window,
+                    self._spoken(self._normalize([option])),
+                    blank=self._blank,
+                    separator=self._separator,
+                    penalty=_CHOICE_STAR_PENALTY,
+                )
+                scores.append(float("-inf") if path is None else path[1])
+            return scores
+        except Exception:
+            logger.exception("reading choice failed; keeping the default reading")
+            return [float("-inf")] * len(options)
+
+    def best(self, options: Sequence[str], start: float, end: float) -> int:
+        """Index of the reading in `options` that best matches the audio between
+        `start` and `end` seconds (0, the default reading, if it cannot tell)."""
+        return int(np.argmax(self.scores(options, start, end)))
+
+
+def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[ChunkAligner]:
+    """A ChunkAligner for `wav`, or None when no aligner serves `language`."""
+    if not supports(language):
+        return None
+    code = language_code(language)
     loaded = _load(code)
     if loaded is None:
         return None
     session, vocab = loaded
-
-    # Everything below is refinement of a finished transcript: any failure
-    # falls back to the model's own times rather than failing the request.
-    try:
-        spoken: list[tuple[int, list[int]]] = []
-        lettered = unplaceable = 0
-        for index, text in enumerate(ALIGN_MODELS[code].normalize(words)):
-            parts = [ids for part in text.split() if (ids := [vocab[c] for c in part if c in vocab])]
-            spoken.extend((index, ids) for ids in parts)
-            if any(c.isalpha() for c in words[index]):
-                lettered += 1
-                unplaceable += not parts
-        # Mostly letters the model has never seen (Cyrillic, Greek, ...): this is
-        # not its language, and forcing it would be worse than the model's times.
-        if not spoken or unplaceable * 2 > lettered:
-            return None
-        emission, frame_starts = _emission(session, wav)
-        return word_spans(
-            emission,
-            frame_starts,
-            spoken,
-            len(words),
-            blank=vocab.get("<pad>", 0),
-            separator=vocab.get("|"),
-        )
-    except Exception:
-        # The transcript is already done; a failed refinement must not fail it.
-        logger.exception("word alignment failed; keeping model word times")
-        return None
+    return ChunkAligner(wav, session, vocab, ALIGN_MODELS[code].normalize)

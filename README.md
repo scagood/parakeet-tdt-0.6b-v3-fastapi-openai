@@ -302,10 +302,16 @@ transcript = client.audio.transcriptions.create(
 * **Numbers and symbols** are aligned as spoken: `42` as "forty two", `2026` as
   "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
   `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
-  folded (`café`). Only timing depends on this — the text is never changed — so
-  money heard as weight (`25 lb` for "twenty five pounds") still lines up. A
-  count in year range (`1500`) is read as a year, so if it was said "one
-  thousand five hundred" it starts a little late.
+  folded (`café`). A number is read together with the words that change how it
+  is said, the same way [spoken numbers](#spoken-numbers) reads it (on or off):
+  `5 May` as "the fifth of May", `July 4` as "July fourth", `90 mph` as "ninety
+  miles per hour", `715 a.m.` as "seven fifteen a.m.", `100-200` as "one
+  hundred to two hundred". Only timing depends on this — the text is never
+  changed — so money heard as weight (`25 lb` for "twenty five pounds") still
+  lines up. A count in year range (`1500`) is read as a year, so if it was said
+  "one thousand five hundred" it starts a little late. A lone letter is looked
+  for as its name, which is how it sounds (`R&D` as "ar and dee", `Vitamin C`
+  as "vitamin see", the "p" of `£11.40p`).
 * **Transcript mistakes.** On clean speech, a word Parakeet missed or got wrong
   does not drag its neighbours' times (as in MMS forced alignment, the gaps
   between words can absorb speech the transcript lacks); in heavy noise it
@@ -313,18 +319,71 @@ transcript = client.audio.transcriptions.create(
   it takes the pause, but a long one invented in the middle of continuous
   speech pushes its neighbours aside.
 
-The aligner only runs when alignment is on and words are returned, one request
-at a time on its own thread pool so it never holds up other requests' audio
-decoding. It downloads (~95 MB) on the first such request and runs on CPU,
-adding roughly 2 s per 30 s of audio on a 4-core machine. If the download
-fails, word times fall back to Parakeet's and the load is retried every 5
-minutes; `/health` reports the aligner's state under `aligner`.
+The aligner only runs when alignment is on and words are returned (and for
+[spoken numbers](#spoken-numbers)), one request at a time on its own thread
+pool so it never holds up other requests' audio decoding. It downloads (~95 MB)
+on the first such request and runs on CPU, adding roughly 2 s per 30 s of audio
+on a 4-core machine. If the download fails, word times fall back to Parakeet's
+and the load is retried every 5 minutes; `/health` reports the aligner's state
+under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
 | `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every English word request unless it sends `align_words=false` |
-| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none; empty to align only when `language` is sent |
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers; empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
+
+#### Spoken numbers
+
+Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
+may come back as `£25` or `25 lb`, "five dollars" as `$5`, "ten thirty" as
+`1030`, and "nine one one" as `911`. With the form field `spoken_numbers=true`
+(OpenAI SDK: `extra_body={"spoken_numbers": True}`), or
+`PARAKEET_SPOKEN_NUMBERS=true` for requests that don't send it, English
+transcripts (text, segments, words, every response format and the batch
+endpoint) say numbers, money and units in words, the way they were said:
+
+| Parakeet wrote | Transcript says |
+|---|---|
+| `$5`, `cost$25` | five dollars, cost twenty-five dollars |
+| `£25`, `25 lb` | twenty-five pounds |
+| `$5 million`, `$5m` | five million dollars |
+| `20°C`, `50%`, `21st` | twenty degrees Celsius, fifty percent, twenty-first |
+| `5 May`, `90 mph` | the fifth of May, ninety miles per hour |
+| `MP3`, `COVID-19`, `5m`, `12C` | unchanged: names, or ambiguous |
+
+Different speech often comes out as the same text — `£2.10` is "two pounds
+ten", "two pounds and ten pence" or "two ten"; `1500` is "fifteen hundred" or
+"one thousand five hundred"; `911` is "nine one one" or "nine eleven" — so each
+number's possible readings are scored against its stretch of the audio by the
+word aligner, and the one that was said is kept. Likely mishearings of an
+amount are scored too (`£1.10` for "two pounds ten", `€3` for "thirty euros";
+not of a time, date, ordinal or code), and one replaces Parakeet's number only
+when the audio prefers it by a clear margin. Word times follow the spoken words.
+
+* **Cost.** Almost every number has several readings or a likely mishearing
+  (97% of the chunks with a number in our test corpus), so the aligner model
+  runs for most chunks that contain a number: roughly 2 s per 30 s chunk on a
+  4-core CPU, plus 0.5–0.9 s to choose on a dense 60–75 s chunk (a number every
+  few seconds; prices cost the most). Those requests queue on the aligner's
+  single worker with word requests, so audio with numbers in it is heard at
+  about 13x real time however many requests are waiting. Requests with no
+  number, or whose numbers have nothing to decide (`6pm`, `6 pm`), are not held
+  up. With the model unavailable, each number's
+  first reading is used — a fixed default, usually the most common one ("two
+  pounds ten", "ten to fifteen"), though a code is read as an amount (`911` as
+  "nine hundred eleven"), and so are a time and a year before 1100 (`1030` as
+  "one thousand thirty", `1066` as "one thousand sixty-six") — and Parakeet's
+  number is kept.
+* **Language.** English only, decided as for word timestamps: a request without
+  `language` is taken as `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you
+  change it. A chunk mostly in another alphabet is left as written, but
+  Latin-script languages sent without `language` are rewritten as if English —
+  set the default empty if you serve them.
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_SPOKEN_NUMBERS` | `false` | spoken numbers for requests that don't send `spoken_numbers`; `true` says them in every English transcript unless the request sends `spoken_numbers=false` |
 
 ### Batch transcription
 

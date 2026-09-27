@@ -1,7 +1,9 @@
-"""The /v1/audio/transcriptions word-timestamp path, with Parakeet and the aligner faked.
+"""The /v1/audio/transcriptions word-timestamp and spoken-number paths (and the
+batch endpoint), with Parakeet and the aligner faked.
 
-The handler is called directly (CI has no httpx for TestClient); everything
-between the form fields and the JSON body is the real code.
+The handlers are called directly (CI has no httpx for TestClient); everything
+between the form fields and the response body is the real code. The fake
+audio's bytes are the transcript Parakeet "hears".
 """
 from __future__ import annotations
 
@@ -24,39 +26,104 @@ WORDS = ["hello", "world"]
 class _Worker:
     async def submit_many(self, pieces, _model_name):
         return [
-            SimpleNamespace(text="hello world", tokens=[" hello", " world"], timestamps=[0.0, 0.8])
-            for _ in pieces
+            SimpleNamespace(
+                text=piece,
+                tokens=[" " + word for word in piece.split()],
+                timestamps=[0.8 * i for i in range(len(piece.split()))],
+            )
+            for piece in pieces
         ]
+
+
+def _prepared(raw):
+    return routes._PreparedAudio(
+        waveform=None, ranges=[(0, 2 * TARGET_SR)], pieces=[raw.decode()], duration=2.0
+    )
 
 
 @pytest.fixture
 def calls(monkeypatch):
-    """Record aligner calls; the fake aligner re-times words to 0.1 s + 1.5 s each."""
+    """Record aligner calls; the fake aligner re-times words to 0.1 s + 1.5 s each
+    and hears every reading equally well (so the first is kept)."""
     recorded = []
 
-    def fake_align(chunk_wav, words, language=None):
-        recorded.append({"words": words, "language": language, "thread": threading.current_thread().name})
-        return [(0.1 + 1.5 * i, 0.4 + 1.5 * i) for i in range(len(words))]
+    class FakeChunk:
+        def __init__(self, language):
+            self.language = language
 
-    async def fake_prepare(_request, _raw):
-        return routes._PreparedAudio(
-            waveform=None, ranges=[(0, 2 * TARGET_SR)], pieces=["chunk"], duration=2.0
-        )
+        def spans(self, words):
+            recorded.append(
+                {"words": list(words), "language": self.language, "thread": threading.current_thread().name}
+            )
+            return [(0.1 + 1.5 * i, 0.4 + 1.5 * i) for i in range(len(words))]
 
-    monkeypatch.setattr(aligner, "align_words", fake_align)
+        def scores(self, options, _start, _end):
+            recorded.append({"options": list(options), "thread": threading.current_thread().name})
+            return [0.0] * len(options)
+
+        def best(self, _options, _start, _end):
+            return 0
+
+    def fake_for_chunk(_wav, language):
+        return FakeChunk(language) if aligner.supports(language) else None
+
+    async def fake_prepare(_request, raw):
+        return _prepared(raw)
+
+    monkeypatch.setattr(aligner, "for_chunk", fake_for_chunk)
     monkeypatch.setattr(routes, "ALIGN_WORDS", False)
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     monkeypatch.setattr(routes, "_prepare_in_pool", fake_prepare)
+    monkeypatch.setattr(routes, "_prepare_audio", _prepared)
     return recorded
 
 
-async def _transcribe(response_format="verbose_json", granularity="word", language=None, align_words=True):
-    align_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="align")
-    state = SimpleNamespace(worker=_Worker(), ready=True, audio_pool=None, align_pool=align_pool)
+def _pool(thread):
+    """Where a thread belongs: "align" or "audio" pool, else "inline" (the event loop)."""
+    return next((pool for pool in ("align", "audio") if thread.startswith(pool)), "inline")
+
+
+@pytest.fixture
+def stitched(monkeypatch):
+    """Where each _stitch ran: "align", "audio" or "inline" (see _pool)."""
+    threads = []
+    stitch = routes._stitch
+
+    def recording(*args, **kwargs):
+        threads.append(_pool(threading.current_thread().name))
+        return stitch(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_stitch", recording)
+    return threads
+
+
+@pytest.fixture
+def speak(monkeypatch):
+    monkeypatch.setattr(routes, "SPOKEN_NUMBERS", True)
+
+
+def _state():
+    return SimpleNamespace(
+        worker=_Worker(),
+        ready=True,
+        audio_pool=ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio"),
+        align_pool=ThreadPoolExecutor(max_workers=1, thread_name_prefix="align"),
+    )
+
+
+async def _transcribe(
+    response_format="verbose_json",
+    granularity="word",
+    language=None,
+    text="hello world",
+    align_words=True,
+    spoken_numbers=None,
+):
+    state = _state()
     try:
         response = await routes.transcribe(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
-            file=UploadFile(io.BytesIO(b"audio"), filename="a.wav"),
+            file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
             model=None,
             response_format=response_format,
             timestamp_granularities=[granularity] if granularity else None,
@@ -65,10 +132,27 @@ async def _transcribe(response_format="verbose_json", granularity="word", langua
             prompt=None,
             temperature=None,
             align_words=align_words,
+            spoken_numbers=spoken_numbers,
         )
     finally:
-        align_pool.shutdown()
-    return json.loads(response.body) if response_format.endswith("json") else response.body
+        state.audio_pool.shutdown()
+        state.align_pool.shutdown()
+    return json.loads(response.body) if response_format.endswith("json") else response.body.decode()
+
+
+async def _batch(*texts, spoken_numbers=None):
+    state = _state()
+    try:
+        body = await routes.transcribe_batch(
+            request=SimpleNamespace(app=SimpleNamespace(state=state)),
+            files=[UploadFile(io.BytesIO(text.encode()), filename=f"{i}.wav") for i, text in enumerate(texts)],
+            model=None,
+            spoken_numbers=spoken_numbers,
+        )
+    finally:
+        state.audio_pool.shutdown()
+        state.align_pool.shutdown()
+    return [item["text"] for item in body["results"]]
 
 
 @pytest.mark.asyncio
@@ -105,9 +189,10 @@ async def test_missing_language_reports_auto_and_uses_the_default(calls):
     ("response_format", "granularity"),
     [("verbose_json", None), ("verbose_json", "segment"), ("json", "word"), ("srt", "word")],
 )
-async def test_alignment_only_runs_when_words_are_returned(calls, response_format, granularity):
+async def test_alignment_only_runs_when_words_are_returned(calls, stitched, response_format, granularity):
     await _transcribe(response_format=response_format, granularity=granularity)
     assert calls == []
+    assert stitched == ["inline"]  # nothing to align: no queue
 
 
 @pytest.mark.asyncio
@@ -124,9 +209,17 @@ async def test_the_request_opts_in_or_out_else_the_server_default(
     assert (body["words"][1]["start"] == 1.6) == aligned  # else Parakeet's 0.8
 
 
-def test_align_words_is_an_optional_form_field():
-    # the handler is called directly above, so pin what FastAPI will parse
-    field = inspect.signature(routes.transcribe).parameters["align_words"]
+@pytest.mark.parametrize(
+    ("handler", "name"),
+    [
+        (routes.transcribe, "align_words"),
+        (routes.transcribe, "spoken_numbers"),
+        (routes.transcribe_batch, "spoken_numbers"),
+    ],
+)
+def test_the_switches_are_optional_form_fields(handler, name):
+    # the handlers are called directly here, so pin what FastAPI will parse
+    field = inspect.signature(handler).parameters[name]
     assert isinstance(field.default, params.Form) and field.default.default is None
     assert field.annotation in ("Optional[bool]", "bool | None")
 
@@ -135,3 +228,130 @@ def test_health_reports_aligner_state(monkeypatch):
     monkeypatch.setattr(aligner, "status", lambda: {"en": "failed"})
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ready=True)))
     assert routes.health(request)["aligner"] == {"en": "failed"}
+
+
+# --------------------------------------------------------------------------- #
+# Spoken numbers (PARAKEET_SPOKEN_NUMBERS)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_spoken_numbers_are_off_by_default(calls):
+    body = await _transcribe(response_format="json", text="It cost $5 today.")
+    assert body["text"] == "It cost $5 today."
+    assert await _batch("It cost $5 today.") == ["It cost $5 today."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_default", "spoken_numbers", "said"),
+    [(False, None, False), (False, True, True), (True, None, True), (True, False, False)],
+)
+async def test_the_request_says_numbers_or_not_else_the_server_default(
+    calls, monkeypatch, server_default, spoken_numbers, said
+):
+    monkeypatch.setattr(routes, "SPOKEN_NUMBERS", server_default)
+    text = "It cost five dollars today." if said else "It cost $5 today."
+    body = await _transcribe(response_format="json", text="It cost $5 today.", spoken_numbers=spoken_numbers)
+    assert body["text"] == text
+    assert await _batch("It cost $5 today.", spoken_numbers=spoken_numbers) == [text]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [
+        (None, "It cost five dollars today."),  # PARAKEET_ALIGN_DEFAULT_LANGUAGE
+        ("en", "It cost five dollars today."),
+        ("en-GB", "It cost five dollars today."),
+        ("English", "It cost five dollars today."),
+        ("fr", "It cost $5 today."),
+        ("de-DE", "It cost $5 today."),
+    ],
+)
+async def test_spoken_numbers_are_english_only(calls, speak, language, text):
+    body = await _transcribe(response_format="json", language=language, text="It cost $5 today.")
+    assert body["text"] == text
+
+
+@pytest.mark.asyncio
+async def test_spoken_numbers_follow_the_default_language(calls, speak, monkeypatch):
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    assert (await _transcribe(response_format="json", text="It cost $5."))["text"] == "It cost $5."
+    assert await _batch("It cost $5.") == ["It cost $5."]
+    assert (await _transcribe(response_format="json", language="en", text="It cost $5."))["text"] == (
+        "It cost five dollars."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_format", "granularity"),
+    [
+        ("json", None), ("text", None), ("srt", None), ("vtt", None),
+        ("verbose_json", "segment"), ("verbose_json", "word"),
+    ],
+)
+async def test_spoken_numbers_reach_every_response_format(calls, speak, response_format, granularity):
+    body = await _transcribe(response_format=response_format, granularity=granularity, text="It cost $5 today.")
+    if response_format == "verbose_json":
+        assert body["text"] == body["segments"][0]["text"] == "It cost five dollars today."
+        if granularity == "word":
+            assert [w["word"] for w in body["words"]] == ["It", "cost", "five", "dollars", "today."]
+    else:
+        body = body["text"] if response_format == "json" else body
+        assert "It cost five dollars today." in body and "$5" not in body
+
+
+@pytest.mark.asyncio
+async def test_batch_says_numbers_too(calls, speak):
+    texts = await _batch("It cost $5 today.", "No numbers here.")
+    assert texts == ["It cost five dollars today.", "No numbers here."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "pool"),
+    [
+        ("No numbers here.", "inline"),
+        ("No numbers in an MP3 here.", "audio"),  # a digit: phrases are looked for off the loop
+        ("It opens at 6pm.", "audio"),  # one reading, no rivals: nothing to hear
+        ("It opens at 6 pm.", "audio"),  # nor spaced
+        ("That'll be £2.10 please.", "align"),
+    ],
+)
+async def test_spoken_numbers_queue_on_the_align_pool_only_to_hear_one(calls, stitched, speak, text, pool):
+    await _transcribe(response_format="json", text=text)
+    await _batch(text)
+    assert stitched == [pool, pool]
+    assert all(call["thread"].startswith("align") for call in calls)
+    assert bool(calls) == (pool == "align")
+
+
+@pytest.mark.asyncio
+async def test_numbers_are_never_read_on_the_event_loop(calls, speak, monkeypatch):
+    # Reading every number's readings back through number_parse is CPU work
+    # (seconds for a long request of codes): deciding and saying both run off the loop.
+    threads = []
+    phrases = routes.spoken.phrases
+
+    def recording(*args, **kwargs):
+        threads.append(_pool(threading.current_thread().name))
+        return phrases(*args, **kwargs)
+
+    monkeypatch.setattr(routes.spoken, "phrases", recording)
+    text = "Order 001100110011 cost £2.10 at 6pm."
+    await _transcribe(response_format="json", text=text)
+    await _batch(text)
+    assert threads and "inline" not in threads
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_numbers_bug_is_never_a_500(calls, speak, monkeypatch, caplog):
+    def broken(_words, **_options):
+        raise RuntimeError("a bug in spoken.phrases")
+
+    monkeypatch.setattr(routes.spoken, "phrases", broken)
+    body = await _transcribe(text="It cost $5 today.")
+    assert body["text"] == "It cost $5 today."
+    assert [w["word"] for w in body["words"]] == ["It", "cost", "$5", "today."]
+    assert await _batch("It cost $5 today.") == ["It cost $5 today."]
+    assert "spoken numbers failed" in caplog.text

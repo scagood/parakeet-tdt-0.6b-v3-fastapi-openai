@@ -67,9 +67,10 @@ async def lifespan(app: FastAPI):
     app.state.audio_pool = ThreadPoolExecutor(
         max_workers=AUDIO_WORKERS, thread_name_prefix="audio"
     )
-    # ponytail: one word alignment at a time, each on ALIGN_THREADS CPU threads,
-    # so it can't starve decoding or Parakeet. Concurrent word requests queue
-    # here; add a worker-count knob if word-request throughput matters.
+    # ponytail: one aligner job at a time, each on ALIGN_THREADS CPU threads, so
+    # it can't starve decoding or Parakeet. Word requests, and spoken-number
+    # requests with a number to hear (routes._needs_aligner), queue here; add a
+    # worker-count knob if their throughput matters.
     app.state.align_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="align")
     try:
         logger.info("Lifespan startup: loading default model")

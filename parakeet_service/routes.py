@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from . import aligner
+from . import aligner, spoken
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
@@ -25,6 +25,7 @@ from .config import (
     MAX_UPLOAD_BYTES,
     MODEL_ALIASES,
     MODEL_CONFIGS,
+    SPOKEN_NUMBERS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
     logger,
@@ -247,11 +248,163 @@ def _apply_alignment(
         word["end"] = min(max(word["end"], word["start"]), high)
 
 
+# Parakeet's number is trusted unless the audio prefers a mishearing of it
+# (spoken.rivals) by at least this much, in log-prob over the phrase's window.
+# Measured on the TTS benchmarks (381 clips of alternative readings, 306-clip
+# corpus) and on spoken lists of 1-99 (571 numbers): no mishearing beat a
+# right number by more than 11.7, and at 10 some did ("three nil" to "two
+# nil"); the smallest real fix led by 16.3. At 20, 9 + 3 misheard numbers are
+# fixed and none broken; 15 fixes one more, 40 and above lose most of them.
+_CORRECTION_MARGIN = 20.0
+_ZERO = re.compile(rf"(\W*)({'|'.join(spoken.ZERO_WORDS)})(\W*)")
+
+
+def _phrases(texts: Sequence[str], most: Optional[int] = None) -> List[spoken.Phrase]:
+    """The numbers to say in one chunk's words (spoken.phrases): none in a
+    chunk mostly in another alphabet (Cyrillic, Greek, ...), which is not
+    English whatever the request's `language` said; the aligner leaves those
+    untimed by the same rule. Checked second: a chunk with no digit has no
+    phrase, and that is the cheaper test."""
+    found = spoken.phrases(texts, most=most)
+    return [] if found and aligner.other_alphabet(texts) else found
+
+
+def _undecided(texts: Sequence[str], phrase: spoken.Phrase) -> bool:
+    """Whether the audio has anything to decide for `phrase`: which of its
+    readings was said, or whether a misheard number was."""
+    return len(phrase.options) > 1 or bool(spoken.rivals(texts, phrase))
+
+
+def _choose_readings(
+    texts: List[str], found: Sequence[spoken.Phrase], chunk: aligner.ChunkAligner
+) -> List[str]:
+    """Pick, by ear, how each phrase was said, or which number was.
+
+    The default readings are aligned first to find each phrase's neighbours;
+    each phrase is then heard from the end of the word before it to the start
+    of the word after it, so a wrong default only costs its own slot.
+    """
+    # ponytail: the wav2vec2 pass covers the whole chunk (~4 s of CPU per 60 s)
+    # even to hear one number (~0.3 s for its window plus _CONTEXT). For
+    # requests without word times, run it over each phrase's window from
+    # Parakeet's own times instead, if the cost matters.
+    chosen = [phrase.options[0] for phrase in found]
+    said = list(texts)  # spoken.spoken_words(texts), without finding the phrases again
+    for phrase in found:
+        said[phrase.start : phrase.end] = phrase.readings[0]
+    spans = chunk.spans(said) or [None] * len(texts)
+    for index, phrase in enumerate(found):
+        rivals = spoken.rivals(texts, phrase)
+        if len(phrase.options) < 2 and not rivals:
+            continue
+        start = next((s[1] for s in reversed(spans[: phrase.start]) if s is not None), 0.0)
+        end = next((s[0] for s in spans[phrase.end :] if s is not None), float("inf"))
+        own = chunk.scores(phrase.options, start, end)
+        choice = phrase.options[own.index(max(own))]
+        if rivals and max(own) > float("-inf"):
+            theirs = chunk.scores(rivals, start, end)
+            if max(theirs) > max(own) + _CORRECTION_MARGIN:
+                choice = rivals[theirs.index(max(theirs))]
+        chosen[index] = _each_zero(choice, chunk, start, end)
+    return chosen
+
+
+def _each_zero(said: str, chunk: aligner.ChunkAligner, start: float, end: float) -> str:
+    """Speakers mix their zeros within one number ("nine zero oh one"): try
+    each zero the other ways too, one at a time, punctuation kept. The zero
+    already said comes first, so it stays when the audio can't tell."""
+    tokens = said.split()
+    for slot, token in enumerate(tokens):
+        if match := _ZERO.fullmatch(token):
+            opening, said_zero, closing = match.groups()
+            zeros = [said_zero, *(zero for zero in spoken.ZERO_WORDS if zero != said_zero)]
+            ways = [[*tokens[:slot], f"{opening}{zero}{closing}", *tokens[slot + 1 :]] for zero in zeros]
+            tokens = ways[chunk.best([" ".join(way) for way in ways], start, end)]
+    return " ".join(tokens)
+
+
+def _speak_numbers(
+    words: List[Dict[str, Any]], chunk: Callable[[], Optional[aligner.ChunkAligner]]
+) -> Optional[List[Dict[str, Any]]]:
+    """One chunk's words with numbers, money and units said out ("$5" -> "five
+    dollars"), or None if it has none (PARAKEET_SPOKEN_NUMBERS).
+
+    Each number is a phrase with the words that change how it is said
+    (spoken.phrases). The audio, via `chunk()` (called only when a phrase has
+    something to decide, as it loads the aligner), picks how it was said
+    ("£2.10": "two pounds ten", "two pounds and ten pence", ...) and may, by a
+    clear margin, correct a misheard number; without it the first reading is
+    used. A phrase shares its time span out by length among its spoken words;
+    when the aligner runs next it re-times each of them from the audio.
+    """
+    texts = [w["word"] for w in words]
+    found = _phrases(texts, most=2)  # every reading only if the audio will choose
+    if not found:
+        return None
+    chosen = [phrase.options[0] for phrase in found]
+    if any(_undecided(texts, phrase) for phrase in found) and (ear := chunk()) is not None:
+        chosen = _choose_readings(texts, _phrases(texts), ear)
+    out: List[Dict[str, Any]] = []
+    done = 0
+    for phrase, text in zip(found, chosen):
+        out += words[done : phrase.start]
+        if spoken.starts_sentence(texts[phrase.start - 1] if phrase.start else None):
+            text = spoken.capitalize(text)
+        out += _spread(text.split(), words[phrase.start]["start"], words[phrase.end - 1]["end"])
+        done = phrase.end
+    return out + words[done:]
+
+
+def _spread(parts: List[str], start: float, end: float) -> List[Dict[str, Any]]:
+    """Words over the span [start, end], each a share by its length."""
+    share = (end - start) / sum(len(part) for part in parts)
+    out = []
+    for position, part in enumerate(parts):
+        stop = end if position == len(parts) - 1 else start + share * len(part)
+        out.append({"start": start, "end": stop, "word": part})
+        start = stop
+    return out
+
+
+def _group_words(info: Dict[str, Any]) -> List[Tuple[str, float, float]]:
+    """One chunk's BPE pieces (from _extract) as (word, first_ts, last_ts).
+
+    A piece starting with the word marker ("\u2581" or a plain space, depending
+    on export) opens a new word. Parakeet emits the marker as a token of its
+    own before digits and currency signs (" was", " ", "\u00a3", "1"...): it
+    opens the next piece's word.
+    """
+    grouped: List[Tuple[str, float, float]] = []
+    pending_break = False
+    for token, timestamp in zip(info["tokens"], info["timestamps"]):
+        piece = token.replace("\u2581", " ")
+        starts_word = pending_break or piece.startswith(" ")
+        piece = piece.strip()
+        pending_break = starts_word and not piece
+        if not piece:
+            continue
+        if grouped and not starts_word:
+            word, first_ts, _last_ts = grouped[-1]
+            grouped[-1] = (word + piece, first_ts, timestamp)
+        else:
+            grouped.append((piece, timestamp, timestamp))
+    return grouped
+
+
 def _stitch(
     prepared: _PreparedAudio,
     results: Sequence[Any],
-    align: Optional[Callable[[Any, List[str]], Optional[List[Optional[aligner.Span]]]]] = None,
+    *,
+    align: bool = False,
+    speak: bool = False,
+    language: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Chunk results -> (text, segments, words).
+
+    `align` re-times words with the forced aligner; `speak` says numbers out
+    (PARAKEET_SPOKEN_NUMBERS). Either may run the aligner's model: call it
+    through _stitch_request, which keeps that off the event loop.
+    """
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
             f"inference returned {len(results)} results for "
@@ -286,25 +439,7 @@ def _stitch(
             }
         )
 
-        # Group BPE pieces into words: a piece starting with the word marker
-        # ("\u2581" or a plain space, depending on export) opens a new word.
-        # Parakeet emits the marker as a token of its own before digits and
-        # currency signs (" was", " ", "\u00a3", "1"...): it opens the next piece's word.
-        grouped: List[Tuple[str, float, float]] = []  # (word, first_ts, last_ts)
-        pending_break = False
-        for token, timestamp in zip(info["tokens"], timestamps):
-            piece = token.replace("\u2581", " ")
-            starts_word = pending_break or piece.startswith(" ")
-            piece = piece.strip()
-            pending_break = starts_word and not piece
-            if not piece:
-                continue
-            if grouped and not starts_word:
-                word, first_ts, _last_ts = grouped[-1]
-                grouped[-1] = (word + piece, first_ts, timestamp)
-            else:
-                grouped.append((piece, timestamp, timestamp))
-
+        grouped = _group_words(info)
         chunk_words: List[Dict[str, Any]] = []
         for index, (word, first_ts, last_ts) in enumerate(grouped):
             word_start = min(chunk_end, max(chunk_start, chunk_start + first_ts))
@@ -319,10 +454,29 @@ def _stitch(
             word_end = min(chunk_end, max(word_start, word_end))
             chunk_words.append({"start": word_start, "end": word_end, "word": word})
 
-        if align is not None and chunk_words:
+        heard: List[Optional[aligner.ChunkAligner]] = []
+
+        def chunk(wav: Any = chunk_wav) -> Optional[aligner.ChunkAligner]:
+            """The chunk's aligner, made on first use (it loads the model) and shared."""
+            if not heard:
+                heard.append(aligner.for_chunk(wav, language))
+            return heard[0]
+
+        said = None
+        if speak:
+            try:
+                said = _speak_numbers(chunk_words, chunk)
+            except Exception:  # it refines a finished transcript: never a 500 for it
+                logger.exception("spoken numbers failed; keeping Parakeet's text")
+        if said is not None:
+            # Text and words are rewritten together so they always agree.
+            chunk_words = said
+            segments[-1]["segment"] = _clean_text(" ".join(w["word"] for w in chunk_words))
+
+        if align and chunk_words and (timer := chunk()) is not None:
             _apply_alignment(
                 chunk_words,
-                align(chunk_wav, [w["word"] for w in chunk_words]),
+                timer.spans([w["word"] for w in chunk_words]),
                 chunk_start,
                 chunk_end,
             )
@@ -335,6 +489,51 @@ def _stitch(
 
     full_text = _clean_text(" ".join(item["segment"] for item in segments))
     return full_text, segments, words
+
+
+def _needs_aligner(
+    results: Sequence[Any], *, align: bool = False, speak: bool = False, language: Optional[str] = None
+) -> bool:
+    """Whether _stitch, with these flags, runs the aligner's model: for word
+    times, or to hear how a number was said (a phrase with something to
+    decide). The same words and phrases as _stitch's, so they agree; two
+    readings of a phrase are enough to know it has a choice."""
+    if align:
+        return True
+    if not (speak and aligner.supports(language)):
+        return False  # for_chunk answers None without loading anything
+    try:
+        for result in results:
+            texts = [word for word, _first, _last in _group_words(_extract(result))]
+            if any(_undecided(texts, phrase) for phrase in _phrases(texts, most=2)):
+                return True
+    except Exception:  # can't tell: _stitch will log it and keep Parakeet's text
+        return True
+    return False
+
+
+async def _stitch_request(
+    request: Request, prepared: _PreparedAudio, results: Sequence[Any], **flags: Any
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """_stitch(prepared, results, **flags), off the event loop unless it is
+    plain text work (no word times, no digit to say).
+
+    Saying numbers reads their readings back through number_parse, which is
+    CPU work: it, and deciding whether the aligner's model is needed, run on
+    the audio pool. With the model (a second ONNX model over the audio) it runs
+    on the one-worker align pool, off the audio pool so it never holds up other
+    requests' decoding; only those requests queue behind other alignment."""
+    stitch = functools.partial(_stitch, prepared, results, **flags)
+    says_numbers = flags.get("speak") and any(
+        char.isdigit() for result in results for char in str(getattr(result, "text", result))
+    )
+    if not (flags.get("align") or says_numbers):
+        return stitch()
+    loop, state = asyncio.get_running_loop(), request.app.state
+    needs = flags.get("align") or await loop.run_in_executor(
+        state.audio_pool, functools.partial(_needs_aligner, results, **flags)
+    )
+    return await loop.run_in_executor(state.align_pool if needs else state.audio_pool, stitch)
 
 
 async def _infer_prepared(request: Request, prepared: _PreparedAudio, model_name: str):
@@ -403,6 +602,13 @@ def healthz(request: Request):
     return {"status": "ok"}
 
 
+def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
+    """Say numbers in words: the request's `spoken_numbers`, else the server's
+    PARAKEET_SPOKEN_NUMBERS; English only."""
+    wanted = SPOKEN_NUMBERS if spoken_numbers is None else spoken_numbers
+    return wanted and aligner.language_code(language) == "en"
+
+
 @router.post("/v1/audio/transcriptions")
 async def transcribe(
     request: Request,
@@ -419,6 +625,7 @@ async def transcribe(
     prompt: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
     align_words: Optional[bool] = Form(None),
+    spoken_numbers: Optional[bool] = Form(None),
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
@@ -428,6 +635,7 @@ async def transcribe(
     )
     want_words = output_format == "verbose_json" and "word" in granularities
     align = ALIGN_WORDS if align_words is None else align_words
+    speak = _speaks(spoken_numbers, language)
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -439,18 +647,14 @@ async def transcribe(
     infer_ms = (time.perf_counter() - infer_started) * 1000
 
     stitch_started = time.perf_counter()
-    if want_words and align and aligner.supports(language):
-        # Alignment runs a second ONNX model over the audio: keep it off the loop,
-        # and off the audio pool so it never holds up other requests' decoding.
-        full_text, segments, words = await asyncio.get_running_loop().run_in_executor(
-            request.app.state.align_pool,
-            _stitch,
-            prepared,
-            results,
-            functools.partial(aligner.align_words, language=language),
-        )
-    else:
-        full_text, segments, words = _stitch(prepared, results)
+    full_text, segments, words = await _stitch_request(
+        request,
+        prepared,
+        results,
+        align=want_words and align and aligner.supports(language),
+        speak=speak,
+        language=language,
+    )
     stitch_ms = (time.perf_counter() - stitch_started) * 1000
 
     logger.info(
@@ -504,6 +708,7 @@ async def transcribe_batch(
     request: Request,
     files: List[UploadFile] = File(...),
     model: Optional[str] = Form(None),
+    spoken_numbers: Optional[bool] = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -561,13 +766,15 @@ async def transcribe_batch(
         raise HTTPException(status_code=503, detail="Model is not ready")
     flat_results = await worker.submit_many(flattened, model_name)
 
+    # The batch endpoint takes no `language`: the default decides.
+    speak = _speaks(spoken_numbers, None)
     cursor = 0
     response_items = []
     for filename, prepared in zip(filenames, prepared_files):
         count = len(prepared.pieces)
         item_results = flat_results[cursor : cursor + count]
         cursor += count
-        text, _segments, _words = _stitch(prepared, item_results)
+        text, _segments, _words = await _stitch_request(request, prepared, item_results, speak=speak)
         response_items.append(
             {"filename": filename, "text": text, "duration": prepared.duration}
         )
