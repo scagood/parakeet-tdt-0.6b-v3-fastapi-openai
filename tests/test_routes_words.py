@@ -35,7 +35,7 @@ class _Worker:
         ]
 
 
-def _prepared(raw):
+def _prepared(raw, *_bounds):
     return routes._PreparedAudio(
         waveform=None, ranges=[(0, 2 * TARGET_SR)], pieces=[raw.decode()], duration=2.0
     )
@@ -67,7 +67,7 @@ def calls(monkeypatch):
     def fake_for_chunk(_wav, language):
         return FakeChunk(language) if aligner.supports(language) else None
 
-    async def fake_prepare(_request, raw):
+    async def fake_prepare(_request, raw, *_bounds):
         return _prepared(raw)
 
     monkeypatch.setattr(aligner, "for_chunk", fake_for_chunk)
