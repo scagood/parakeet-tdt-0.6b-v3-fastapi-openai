@@ -269,6 +269,25 @@ transcript = client.audio.transcriptions.create(
 `verbose_json`. `verbose_json` returns segments, and word timestamps as well
 when `timestamp_granularities[]=word` is sent.
 
+#### Word timestamps
+
+For English (a request with `language=en` or no `language` at all), word
+times come from a forced aligner rather than from Parakeet. Parakeet decides the
+words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
+finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
+no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
+estimated; aligned times sit on 20 ms frames and the ends come from the audio.
+Other languages keep Parakeet's times.
+
+The aligner only runs when words are requested. It downloads (~95 MB) on the
+first such request and runs on CPU, adding roughly 2 s per 30 s of audio on a
+4-core machine.
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_ALIGN_WORDS` | `true` | `false` keeps Parakeet's word times and never downloads the aligner |
+| `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
+
 ### Batch transcription
 
 `POST /v1/audio/transcriptions/batch` takes several `files=` parts in one

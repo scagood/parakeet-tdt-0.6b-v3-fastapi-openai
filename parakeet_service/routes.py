@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from . import aligner
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
@@ -211,8 +213,40 @@ async def _prepare_in_pool(request: Request, raw: bytes) -> _PreparedAudio:
         raise HTTPException(status_code=415, detail="Audio could not be decoded") from exc
 
 
+def _apply_alignment(
+    words: List[Dict[str, Any]],
+    spans: Optional[Sequence[Optional[Tuple[float, float]]]],
+    chunk_start: float,
+    chunk_end: float,
+) -> None:
+    """Re-time one chunk's words from aligner spans (seconds from chunk start).
+
+    Words the aligner could not place keep their model times, squeezed between
+    their aligned neighbours so the word list stays in order.
+    """
+    if not spans:
+        return
+    for word, span in zip(words, spans):
+        if span is not None:
+            word["start"] = min(chunk_end, chunk_start + span[0])
+            word["end"] = min(chunk_end, max(word["start"], chunk_start + span[1]))
+    for index, (word, span) in enumerate(zip(words, spans)):
+        if span is not None:
+            continue
+        low = words[index - 1]["end"] if index else chunk_start
+        high = next(
+            (w["start"] for w, s in zip(words[index + 1 :], spans[index + 1 :]) if s is not None),
+            chunk_end,
+        )
+        high = max(low, high)
+        word["start"] = min(max(word["start"], low), high)
+        word["end"] = min(max(word["end"], word["start"]), high)
+
+
 def _stitch(
-    prepared: _PreparedAudio, results: Sequence[Any]
+    prepared: _PreparedAudio,
+    results: Sequence[Any],
+    align: Optional[Callable[[Any, List[str]], Optional[List[Optional[Tuple[float, float]]]]]] = None,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
@@ -222,7 +256,9 @@ def _stitch(
 
     segments: List[Dict[str, Any]] = []
     words: List[Dict[str, Any]] = []
-    for (start_sample, end_sample), result in zip(prepared.ranges, results):
+    for (start_sample, end_sample), chunk_wav, result in zip(
+        prepared.ranges, prepared.pieces, results
+    ):
         chunk_start = start_sample / TARGET_SR
         chunk_end = min(prepared.duration, end_sample / TARGET_SR)
         info = _extract(result)
@@ -261,6 +297,7 @@ def _stitch(
             else:
                 grouped.append((piece, timestamp, timestamp))
 
+        chunk_words: List[Dict[str, Any]] = []
         for index, (word, first_ts, last_ts) in enumerate(grouped):
             word_start = min(chunk_end, max(chunk_start, chunk_start + first_ts))
             if index + 1 < len(grouped):
@@ -272,7 +309,16 @@ def _stitch(
             # than letting a word absorb the silence before the next word.
             word_end = min(next_start, chunk_start + last_ts + _WORD_TAIL_SEC)
             word_end = min(chunk_end, max(word_start, word_end))
-            words.append({"start": word_start, "end": word_end, "word": word})
+            chunk_words.append({"start": word_start, "end": word_end, "word": word})
+
+        if align is not None and chunk_words:
+            _apply_alignment(
+                chunk_words,
+                align(chunk_wav, [w["word"] for w in chunk_words]),
+                chunk_start,
+                chunk_end,
+            )
+        words.extend(chunk_words)
 
     full_text = _clean_text(" ".join(item["segment"] for item in segments))
     return full_text, segments, words
@@ -359,9 +405,13 @@ async def transcribe(
     prompt: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
 ):
-    del language, prompt, temperature  # accepted for OpenAI client compatibility
+    del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
     output_format = _validate_format(response_format)
+    granularities = set(timestamp_granularities or []) | set(
+        timestamp_granularities_plain or []
+    )
+    want_words = output_format == "verbose_json" and "word" in granularities
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -371,15 +421,30 @@ async def transcribe(
     infer_started = time.perf_counter()
     results = await _infer_prepared(request, prepared, model_name)
     infer_ms = (time.perf_counter() - infer_started) * 1000
-    full_text, segments, words = _stitch(prepared, results)
+
+    stitch_started = time.perf_counter()
+    if want_words and aligner.supports(language):
+        # Alignment runs a second ONNX model over the audio: keep it off the loop.
+        full_text, segments, words = await asyncio.get_running_loop().run_in_executor(
+            request.app.state.audio_pool,
+            _stitch,
+            prepared,
+            results,
+            functools.partial(aligner.align_words, language=language),
+        )
+    else:
+        full_text, segments, words = _stitch(prepared, results)
+    stitch_ms = (time.perf_counter() - stitch_started) * 1000
 
     logger.info(
-        "transcribe model=%s dur=%.2fs chunks=%d decode=%.0fms infer=%.0fms total=%.0fms",
+        "transcribe model=%s dur=%.2fs chunks=%d decode=%.0fms infer=%.0fms "
+        "stitch=%.0fms total=%.0fms",
         model_name,
         prepared.duration,
         len(prepared.pieces),
         decode_ms,
         infer_ms,
+        stitch_ms,
         (time.perf_counter() - started) * 1000,
     )
 
@@ -390,9 +455,6 @@ async def transcribe(
     if output_format == "vtt":
         return Response(_segments_to_vtt(segments), media_type="text/vtt")
     if output_format == "verbose_json":
-        granularities = set(timestamp_granularities or []) | set(
-            timestamp_granularities_plain or []
-        )
         return JSONResponse(
             {
                 "task": "transcribe",
@@ -414,7 +476,7 @@ async def transcribe(
                     }
                     for index, segment in enumerate(segments)
                 ],
-                "words": words if "word" in granularities else None,
+                "words": words if want_words else None,
             }
         )
     return JSONResponse({"text": full_text})

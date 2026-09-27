@@ -191,6 +191,9 @@ WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
 # model cannot run one synthetic chunk would 500 every real request, and an
 # orchestrator restarts a crashed replica faster than it notices a sick one.
 WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.0)
+# Word timestamps are re-timed by a wav2vec2 forced aligner (aligner.py) when a
+# request asks for them. The aligner downloads on the first such request.
+ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", True)
 
 MAX_UPLOAD_BYTES = _env_int(
     "PARAKEET_MAX_UPLOAD_BYTES", 256 * 1024 * 1024, minimum=1
@@ -349,6 +352,10 @@ DEFAULT_INTRA = 1 if USE_GPU != "false" else min(_physical, _available_logical)
 ORT_INTRA_THREADS = _env_int("PARAKEET_ORT_INTRA_THREADS", DEFAULT_INTRA)
 ORT_INTER_THREADS = _env_int("PARAKEET_ORT_INTER_THREADS", 1)
 AUDIO_WORKERS = _env_int("PARAKEET_AUDIO_WORKERS", min(8, _physical))
+# The word aligner always runs on CPU, even when Parakeet has the GPU, so it
+# cannot share ORT_INTRA_THREADS (1 in GPU mode). Its int8 kernels stop scaling
+# at about four threads.
+ALIGN_THREADS = _env_int("PARAKEET_ALIGN_THREADS", min(4, _physical))
 # Each InferencePool worker runs its own ORT call with ORT_INTRA_THREADS
 # spinning threads, so workers x intra-op threads is what has to fit the CPUs
 # the quota actually grants; four workers on four intra-op threads would put
