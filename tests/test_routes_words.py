@@ -5,6 +5,7 @@ between the form fields and the JSON body is the real code.
 """
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import threading
@@ -12,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-from fastapi import UploadFile
+from fastapi import UploadFile, params
 
 from parakeet_service import aligner, routes
 from parakeet_service.config import TARGET_SR
@@ -43,13 +44,13 @@ def calls(monkeypatch):
         )
 
     monkeypatch.setattr(aligner, "align_words", fake_align)
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", True)
+    monkeypatch.setattr(routes, "ALIGN_WORDS", False)
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     monkeypatch.setattr(routes, "_prepare_in_pool", fake_prepare)
     return recorded
 
 
-async def _transcribe(response_format="verbose_json", granularity="word", language=None):
+async def _transcribe(response_format="verbose_json", granularity="word", language=None, align_words=True):
     align_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="align")
     state = SimpleNamespace(worker=_Worker(), ready=True, audio_pool=None, align_pool=align_pool)
     try:
@@ -63,6 +64,7 @@ async def _transcribe(response_format="verbose_json", granularity="word", langua
             language=language,
             prompt=None,
             temperature=None,
+            align_words=align_words,
         )
     finally:
         align_pool.shutdown()
@@ -109,10 +111,24 @@ async def test_alignment_only_runs_when_words_are_returned(calls, response_forma
 
 
 @pytest.mark.asyncio
-async def test_disabled_alignment_keeps_model_times(calls, monkeypatch):
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", False)
-    body = await _transcribe()
-    assert calls == [] and body["words"][1]["start"] == 0.8
+@pytest.mark.parametrize(
+    ("server_default", "align_words", "aligned"),
+    [(False, None, False), (False, True, True), (True, None, True), (True, False, False)],
+)
+async def test_the_request_opts_in_or_out_else_the_server_default(
+    calls, monkeypatch, server_default, align_words, aligned
+):
+    monkeypatch.setattr(routes, "ALIGN_WORDS", server_default)
+    body = await _transcribe(align_words=align_words)
+    assert bool(calls) == aligned
+    assert (body["words"][1]["start"] == 1.6) == aligned  # else Parakeet's 0.8
+
+
+def test_align_words_is_an_optional_form_field():
+    # the handler is called directly above, so pin what FastAPI will parse
+    field = inspect.signature(routes.transcribe).parameters["align_words"]
+    assert isinstance(field.default, params.Form) and field.default.default is None
+    assert field.annotation in ("Optional[bool]", "bool | None")
 
 
 def test_health_reports_aligner_state(monkeypatch):
