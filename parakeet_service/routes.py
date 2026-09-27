@@ -16,6 +16,7 @@ from . import aligner, spoken
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
+    ALIGN_WORDS,
     CPU_INFO,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
@@ -601,6 +602,13 @@ def healthz(request: Request):
     return {"status": "ok"}
 
 
+def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
+    """Say numbers in words: the request's `spoken_numbers`, else the server's
+    PARAKEET_SPOKEN_NUMBERS; English only."""
+    wanted = SPOKEN_NUMBERS if spoken_numbers is None else spoken_numbers
+    return wanted and aligner.language_code(language) == "en"
+
+
 @router.post("/v1/audio/transcriptions")
 async def transcribe(
     request: Request,
@@ -616,6 +624,8 @@ async def transcribe(
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
+    align_words: Optional[bool] = Form(None),
+    spoken_numbers: Optional[bool] = Form(None),
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
@@ -624,7 +634,8 @@ async def transcribe(
         timestamp_granularities_plain or []
     )
     want_words = output_format == "verbose_json" and "word" in granularities
-    speak = SPOKEN_NUMBERS and aligner.language_code(language) == "en"
+    align = ALIGN_WORDS if align_words is None else align_words
+    speak = _speaks(spoken_numbers, language)
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -640,7 +651,7 @@ async def transcribe(
         request,
         prepared,
         results,
-        align=want_words and aligner.supports(language),
+        align=want_words and align and aligner.supports(language),
         speak=speak,
         language=language,
     )
@@ -697,6 +708,7 @@ async def transcribe_batch(
     request: Request,
     files: List[UploadFile] = File(...),
     model: Optional[str] = Form(None),
+    spoken_numbers: Optional[bool] = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -755,7 +767,7 @@ async def transcribe_batch(
     flat_results = await worker.submit_many(flattened, model_name)
 
     # The batch endpoint takes no `language`: the default decides.
-    speak = SPOKEN_NUMBERS and aligner.language_code(None) == "en"
+    speak = _speaks(spoken_numbers, None)
     cursor = 0
     response_items = []
     for filename, prepared in zip(filenames, prepared_files):

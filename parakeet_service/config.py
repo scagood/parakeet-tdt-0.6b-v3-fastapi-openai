@@ -191,11 +191,11 @@ WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
 # model cannot run one synthetic chunk would 500 every real request, and an
 # orchestrator restarts a crashed replica faster than it notices a sick one.
 WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.0)
-# Word timestamps are re-timed by a wav2vec2 forced aligner (aligner.py) when a
-# request asks for them, and spoken numbers use it to hear how a number was
-# said. The aligner downloads on the first such request. Off keeps Parakeet's
-# word times, and each number's first reading.
-ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", True)
+# Word timestamps can be re-timed by a wav2vec2 forced aligner (aligner.py). A
+# request opts in with `align_words=true`; this is the answer for requests that
+# don't say. Off by default: it costs ~2 s of CPU per 30 s of audio, and not
+# every client wants it. The aligner downloads on the first request that uses it.
+ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", False)
 # Language assumed for alignment (and spoken numbers) when a request sends no
 # `language`. Parakeet v3 is multilingual and nothing here detects the language,
 # so this is an operator's statement about their audio. Empty means only align
@@ -203,7 +203,9 @@ ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", True)
 ALIGN_DEFAULT_LANGUAGE = os.getenv("PARAKEET_ALIGN_DEFAULT_LANGUAGE", "en").strip().lower()
 # Parakeet writes numbers the way it chooses, and not consistently: "twenty-five
 # pounds" may come back as "£25" or "25 lb", "five dollars" as "$5". On, English
-# transcripts say numbers, money and units in words instead (spoken.py).
+# transcripts say numbers, money and units in words instead (spoken.py), using
+# the aligner to hear how each was said. A request opts in or out with
+# `spoken_numbers=true|false`; this is the answer for requests that don't say.
 SPOKEN_NUMBERS = _env_bool("PARAKEET_SPOKEN_NUMBERS", False)
 
 MAX_UPLOAD_BYTES = _env_int(

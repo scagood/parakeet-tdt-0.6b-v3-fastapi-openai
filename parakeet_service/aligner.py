@@ -20,7 +20,7 @@ import numpy as np
 import onnxruntime as ort
 
 from . import spoken
-from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, ALIGN_WORDS, TARGET_SR, logger
+from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, TARGET_SR, logger
 from .model import _build_sess_options
 
 Span = tuple[float, float]
@@ -148,13 +148,11 @@ def language_code(language: Optional[str]) -> str:
 
 
 def supports(language: Optional[str]) -> bool:
-    return ALIGN_WORDS and language_code(language) in ALIGN_MODELS
+    return language_code(language) in ALIGN_MODELS
 
 
 def status() -> dict[str, str]:
     """Per-language aligner state, for /health."""
-    if not ALIGN_WORDS:
-        return {code: "disabled" for code in ALIGN_MODELS}
     return {
         code: "loaded" if code in _loaded else "failed" if code in _failed_at else "not loaded"
         for code in ALIGN_MODELS

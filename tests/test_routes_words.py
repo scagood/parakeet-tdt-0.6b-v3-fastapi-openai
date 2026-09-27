@@ -7,6 +7,7 @@ audio's bytes are the transcript Parakeet "hears".
 """
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import threading
@@ -14,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-from fastapi import UploadFile
+from fastapi import UploadFile, params
 
 from parakeet_service import aligner, routes
 from parakeet_service.config import TARGET_SR
@@ -70,7 +71,7 @@ def calls(monkeypatch):
         return _prepared(raw)
 
     monkeypatch.setattr(aligner, "for_chunk", fake_for_chunk)
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", True)
+    monkeypatch.setattr(routes, "ALIGN_WORDS", False)
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     monkeypatch.setattr(routes, "_prepare_in_pool", fake_prepare)
     monkeypatch.setattr(routes, "_prepare_audio", _prepared)
@@ -110,7 +111,14 @@ def _state():
     )
 
 
-async def _transcribe(response_format="verbose_json", granularity="word", language=None, text="hello world"):
+async def _transcribe(
+    response_format="verbose_json",
+    granularity="word",
+    language=None,
+    text="hello world",
+    align_words=True,
+    spoken_numbers=None,
+):
     state = _state()
     try:
         response = await routes.transcribe(
@@ -123,6 +131,8 @@ async def _transcribe(response_format="verbose_json", granularity="word", langua
             language=language,
             prompt=None,
             temperature=None,
+            align_words=align_words,
+            spoken_numbers=spoken_numbers,
         )
     finally:
         state.audio_pool.shutdown()
@@ -130,13 +140,14 @@ async def _transcribe(response_format="verbose_json", granularity="word", langua
     return json.loads(response.body) if response_format.endswith("json") else response.body.decode()
 
 
-async def _batch(*texts):
+async def _batch(*texts, spoken_numbers=None):
     state = _state()
     try:
         body = await routes.transcribe_batch(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             files=[UploadFile(io.BytesIO(text.encode()), filename=f"{i}.wav") for i, text in enumerate(texts)],
             model=None,
+            spoken_numbers=spoken_numbers,
         )
     finally:
         state.audio_pool.shutdown()
@@ -185,10 +196,32 @@ async def test_alignment_only_runs_when_words_are_returned(calls, stitched, resp
 
 
 @pytest.mark.asyncio
-async def test_disabled_alignment_keeps_model_times(calls, monkeypatch):
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", False)
-    body = await _transcribe()
-    assert calls == [] and body["words"][1]["start"] == 0.8
+@pytest.mark.parametrize(
+    ("server_default", "align_words", "aligned"),
+    [(False, None, False), (False, True, True), (True, None, True), (True, False, False)],
+)
+async def test_the_request_opts_in_or_out_else_the_server_default(
+    calls, monkeypatch, server_default, align_words, aligned
+):
+    monkeypatch.setattr(routes, "ALIGN_WORDS", server_default)
+    body = await _transcribe(align_words=align_words)
+    assert bool(calls) == aligned
+    assert (body["words"][1]["start"] == 1.6) == aligned  # else Parakeet's 0.8
+
+
+@pytest.mark.parametrize(
+    ("handler", "name"),
+    [
+        (routes.transcribe, "align_words"),
+        (routes.transcribe, "spoken_numbers"),
+        (routes.transcribe_batch, "spoken_numbers"),
+    ],
+)
+def test_the_switches_are_optional_form_fields(handler, name):
+    # the handlers are called directly here, so pin what FastAPI will parse
+    field = inspect.signature(handler).parameters[name]
+    assert isinstance(field.default, params.Form) and field.default.default is None
+    assert field.annotation in ("Optional[bool]", "bool | None")
 
 
 def test_health_reports_aligner_state(monkeypatch):
@@ -205,6 +238,21 @@ async def test_spoken_numbers_are_off_by_default(calls):
     body = await _transcribe(response_format="json", text="It cost $5 today.")
     assert body["text"] == "It cost $5 today."
     assert await _batch("It cost $5 today.") == ["It cost $5 today."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_default", "spoken_numbers", "said"),
+    [(False, None, False), (False, True, True), (True, None, True), (True, False, False)],
+)
+async def test_the_request_says_numbers_or_not_else_the_server_default(
+    calls, monkeypatch, server_default, spoken_numbers, said
+):
+    monkeypatch.setattr(routes, "SPOKEN_NUMBERS", server_default)
+    text = "It cost five dollars today." if said else "It cost $5 today."
+    body = await _transcribe(response_format="json", text="It cost $5 today.", spoken_numbers=spoken_numbers)
+    assert body["text"] == text
+    assert await _batch("It cost $5 today.", spoken_numbers=spoken_numbers) == [text]
 
 
 @pytest.mark.asyncio
@@ -279,11 +327,9 @@ async def test_spoken_numbers_queue_on_the_align_pool_only_to_hear_one(calls, st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("align_words", [True, False])
-async def test_numbers_are_never_read_on_the_event_loop(calls, speak, monkeypatch, align_words):
+async def test_numbers_are_never_read_on_the_event_loop(calls, speak, monkeypatch):
     # Reading every number's readings back through number_parse is CPU work
     # (seconds for a long request of codes): deciding and saying both run off the loop.
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", align_words)
     threads = []
     phrases = routes.spoken.phrases
 
@@ -309,11 +355,3 @@ async def test_a_spoken_numbers_bug_is_never_a_500(calls, speak, monkeypatch, ca
     assert [w["word"] for w in body["words"]] == ["It", "cost", "$5", "today."]
     assert await _batch("It cost $5 today.") == ["It cost $5 today."]
     assert "spoken numbers failed" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_spoken_numbers_without_the_aligner_stay_off_its_queue(calls, stitched, speak, monkeypatch):
-    monkeypatch.setattr(aligner, "ALIGN_WORDS", False)
-    body = await _transcribe(response_format="json", text="That'll be £2.10 please.")
-    assert body["text"] == "That'll be two pounds ten please."
-    assert calls == [] and stitched == ["audio"]

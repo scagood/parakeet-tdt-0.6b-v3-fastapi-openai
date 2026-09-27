@@ -363,7 +363,7 @@ def test_the_default_reading_checks_only_what_it_uses(monkeypatch):
     assert spoken.spoken_words(words, everywhere=True)[1] == full.options[0]
     assert len(full.readings) > 100 and len(checked) == 2  # the written number and its first reading
     assert [phrase.readings for phrase in spoken.phrases(words, most=2)] == [full.readings[:2]]
-    # no audio to choose (PARAKEET_ALIGN_WORDS=false): two readings show there
+    # no audio to choose (the aligner failed to load): two readings show there
     # was a choice, and the first is said
     checked.clear()
     monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
@@ -662,15 +662,12 @@ def test_nothing_to_hear_never_loads_the_model(monkeypatch, written, said):
 
 
 def test_a_number_to_hear_needs_the_model(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "ALIGN_WORDS", True)
     monkeypatch.setattr(routes.aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     results = [_result("No numbers here."), _result("That'll be £2.10 please.")]
     assert routes._needs_aligner(results, speak=True)
     assert not routes._needs_aligner(results)  # spoken numbers off
     assert not routes._needs_aligner(results, speak=True, language="fr")  # no aligner for it
     assert routes._needs_aligner([_result("No numbers here.")], align=True)
-    monkeypatch.setattr(routes.aligner, "ALIGN_WORDS", False)
-    assert not routes._needs_aligner(results, speak=True)
 
 
 @pytest.mark.parametrize(
@@ -748,7 +745,6 @@ def test_a_number_none_of_whose_readings_fit_is_not_corrected(monkeypatch):
 
 def test_a_number_with_one_reading_can_still_be_corrected(monkeypatch):
     # "20%" is said one way, but may be a misheard "2%": the model must hear it
-    monkeypatch.setattr(routes.aligner, "ALIGN_WORDS", True)
     monkeypatch.setattr(routes.aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     ear = _MarginEar(0.0)
     ear.heard = {"two percent": routes._CORRECTION_MARGIN + 1}

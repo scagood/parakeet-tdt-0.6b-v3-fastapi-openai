@@ -271,11 +271,26 @@ when `timestamp_granularities[]=word` is sent.
 
 #### Word timestamps
 
-For English, word times come from a forced aligner rather than from Parakeet.
-Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
+For English, word times can come from a forced aligner rather than from
+Parakeet. Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
 finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
 no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
 estimated; aligned times sit on 20 ms frames and the ends come from the audio.
+
+It is opt-in: send the form field `align_words=true` (or `false` to opt out
+where the server default is on). Requests that don't say get
+`PARAKEET_ALIGN_WORDS`, off unless you change it.
+
+```python
+transcript = client.audio.transcriptions.create(
+  model="parakeet-v3-fp32",
+  file=audio_file,
+  response_format="verbose_json",
+  timestamp_granularities=["word"],
+  language="en",
+  extra_body={"align_words": True},
+)
+```
 
 * **Language.** `language` accepts `en`, `en-US`, `en_GB` or `english`. A
   request without `language` (or with `auto`) is aligned as
@@ -304,16 +319,17 @@ estimated; aligned times sit on 20 ms frames and the ends come from the audio.
   it takes the pause, but a long one invented in the middle of continuous
   speech pushes its neighbours aside.
 
-The aligner runs when words are requested (and for [spoken numbers](#spoken-numbers)),
-one request at a time on its own thread pool so it never holds up other
-requests' audio decoding. It downloads (~95 MB) on the first such request and
-runs on CPU, adding roughly 2 s per 30 s of audio on a 4-core machine. If the download fails, word times
-fall back to Parakeet's and the load is retried every 5 minutes; `/health`
-reports the aligner's state under `aligner`.
+The aligner only runs when alignment is on and words are returned (and for
+[spoken numbers](#spoken-numbers)), one request at a time on its own thread
+pool so it never holds up other requests' audio decoding. It downloads (~95 MB)
+on the first such request and runs on CPU, adding roughly 2 s per 30 s of audio
+on a 4-core machine. If the download fails, word times fall back to Parakeet's
+and the load is retried every 5 minutes; `/health` reports the aligner's state
+under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_ALIGN_WORDS` | `true` | `false` keeps Parakeet's word times, never downloads the aligner, and leaves spoken numbers to their first reading |
+| `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every English word request unless it sends `align_words=false` |
 | `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers; empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
@@ -321,8 +337,10 @@ reports the aligner's state under `aligner`.
 
 Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
 may come back as `£25` or `25 lb`, "five dollars" as `$5`, "ten thirty" as
-`1030`, and "nine one one" as `911`. With `PARAKEET_SPOKEN_NUMBERS=true`,
-English transcripts (text, segments, words, every response format and the batch
+`1030`, and "nine one one" as `911`. With the form field `spoken_numbers=true`
+(OpenAI SDK: `extra_body={"spoken_numbers": True}`), or
+`PARAKEET_SPOKEN_NUMBERS=true` for requests that don't send it, English
+transcripts (text, segments, words, every response format and the batch
 endpoint) say numbers, money and units in words, the way they were said:
 
 | Parakeet wrote | Transcript says |
@@ -351,7 +369,7 @@ when the audio prefers it by a clear margin. Word times follow the spoken words.
   single worker with word requests, so audio with numbers in it is heard at
   about 13x real time however many requests are waiting. Requests with no
   number, or whose numbers have nothing to decide (`6pm`, `6 pm`), are not held
-  up. With `PARAKEET_ALIGN_WORDS=false` or the model unavailable, each number's
+  up. With the model unavailable, each number's
   first reading is used — a fixed default, usually the most common one ("two
   pounds ten", "ten to fifteen"), though a code is read as an amount (`911` as
   "nine hundred eleven"), and so are a time and a year before 1100 (`1030` as
@@ -365,7 +383,7 @@ when the audio prefers it by a clear margin. Word times follow the spoken words.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_SPOKEN_NUMBERS` | `false` | say numbers, money and units in English transcripts as spoken |
+| `PARAKEET_SPOKEN_NUMBERS` | `false` | spoken numbers for requests that don't send `spoken_numbers`; `true` says them in every English transcript unless the request sends `spoken_numbers=false` |
 
 ### Batch transcription
 
