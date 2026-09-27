@@ -103,10 +103,34 @@ def test_word_spans_return_none_for_audio_without_frames():
         ("50%", "FIFTY PERCENT"),
         ("007", "ZERO ZERO SEVEN"),
         ("R&D", "R AND D"),
+        ("20lb", "TWENTY POUNDS"),
+        ("1lb", "ONE POUND"),
+        ("5kg", "FIVE KILOGRAMS"),
+        ("70mph", "SEVENTY MILES PER HOUR"),
+        ("20°C", "TWENTY DEGREES CELSIUS"),
+        ("$5m", "FIVE MILLION DOLLARS"),
+        ("$5.5m", "FIVE POINT FIVE MILLION DOLLARS"),
+        ("£5bn", "FIVE BILLION POUNDS"),
+        ("$20k", "TWENTY THOUSAND DOLLARS"),
+        ("5k", "FIVE K"),  # a race, not money
+        ("5m", "FIVE M"),  # metres or million: left as written
+        ("5kb", "FIVE KB"),  # not a known unit
     ],
 )
 def test_spoken_english_says_it_as_spoken(word, spoken):
     assert aligner._spoken_english(word).split() == spoken.split()
+
+
+@pytest.mark.parametrize("written", [["£25"], ["25", "lb"], ["25lb"], ["25", "lbs."], ["25", "pounds"]])
+def test_money_and_weight_pounds_align_as_the_same_speech(written):
+    # ASR often writes spoken "twenty five pounds" (money) as "25 lb", or back:
+    # the text stays as written, and either way the aligner looks for the same sound.
+    assert " ".join(aligner._normalize_english(written)).split() == "TWENTY FIVE POUNDS".split()
+
+
+def test_unit_words_only_follow_numbers():
+    assert aligner._normalize_english(["1", "lb"]) == ["ONE", "POUND"]
+    assert aligner._normalize_english(["the", "lb", "key"]) == ["THE", "LB", "KEY"]
 
 
 def test_normalize_english_moves_the_currency_after_its_scale_word():

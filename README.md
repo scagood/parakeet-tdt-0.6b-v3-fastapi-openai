@@ -285,9 +285,12 @@ estimated; aligned times sit on 20 ms frames and the ends come from the audio.
   sent without `language` are aligned as English — set the default empty if you
   serve them. Other languages keep Parakeet's times.
 * **Numbers and symbols** are aligned as spoken: `42` as "forty two", `2026` as
-  "twenty twenty six", `$5 million` as "five million dollars", `-5`, `50%`,
-  `21st`; accents are folded (`café`). A count in year range (`1500`) is read as
-  a year, so if it was said "one thousand five hundred" it starts a little late.
+  "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
+  `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
+  folded (`café`). Only timing depends on this — the text is never changed — so
+  money heard as weight (`25 lb` for "twenty five pounds") still lines up. A
+  count in year range (`1500`) is read as a year, so if it was said "one
+  thousand five hundred" it starts a little late.
 * **Transcript mistakes.** On clean speech, a word Parakeet missed or got wrong
   does not drag its neighbours' times (as in MMS forced alignment, the gaps
   between words can absorb speech the transcript lacks); in heavy noise it

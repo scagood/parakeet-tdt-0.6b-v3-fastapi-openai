@@ -42,10 +42,41 @@ _CURRENCIES = {"$": "DOLLAR", "£": "POUND", "€": "EURO"}
 _UNITS = {unit + plural for unit in _CURRENCIES.values() for plural in ("", "S")}
 _SYMBOLS = {"%": " PERCENT", "&": " AND ", "+": " PLUS ", "@": " AT "}
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
+# Unit abbreviations after a number, as (singular, plural) spoken words. What
+# matters for timing is the sound: "£25", "25 lb" and "25lb" are all "twenty
+# five pounds", and ASR often writes money as weight or the other way round.
+_POUNDS = ("POUND", "POUNDS")
+_KM_PER_HOUR = ("KILOMETER PER HOUR", "KILOMETERS PER HOUR")
+_UNIT_WORDS = {
+    "lb": _POUNDS, "lbs": _POUNDS,
+    "oz": ("OUNCE", "OUNCES"),
+    "kg": ("KILOGRAM", "KILOGRAMS"), "kgs": ("KILOGRAM", "KILOGRAMS"),
+    "km": ("KILOMETER", "KILOMETERS"),
+    "cm": ("CENTIMETER", "CENTIMETERS"),
+    "mm": ("MILLIMETER", "MILLIMETERS"),
+    "ml": ("MILLILITER", "MILLILITERS"),
+    "ft": ("FOOT", "FEET"),
+    "mph": ("MILE PER HOUR", "MILES PER HOUR"),
+    "kph": _KM_PER_HOUR, "km/h": _KM_PER_HOUR,
+    "hr": ("HOUR", "HOURS"), "hrs": ("HOUR", "HOURS"),
+    "min": ("MINUTE", "MINUTES"), "mins": ("MINUTE", "MINUTES"),
+    "°c": ("DEGREE CELSIUS", "DEGREES CELSIUS"),
+    "°f": ("DEGREE FAHRENHEIT", "DEGREES FAHRENHEIT"),
+    "°": ("DEGREE", "DEGREES"),
+}
+# Scale abbreviations only count after a currency: "$5m" is five million
+# dollars, but a bare "5m" could be metres, so it keeps its letter.
+_SCALE_ABBREVIATIONS = {"k": "THOUSAND", "m": "MILLION", "bn": "BILLION"}
+_SUFFIXES = "|".join(
+    re.escape(s) for s in sorted({*_UNIT_WORDS, *_SCALE_ABBREVIATIONS}, key=len, reverse=True)
+)
 # A leading minus counts only at the start of a word: "mid-2020s" is not negative.
 _NUMBER = re.compile(
-    r"(?:(?<!\w)(-))?([$£€])?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(st|nd|rd|th)?", re.IGNORECASE
+    r"(?:(?<!\w)(-))?([$£€])?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(st|nd|rd|th)?"
+    rf"(?:({_SUFFIXES})(?![a-z]))?",
+    re.IGNORECASE,
 )
+_TRAILING_PUNCTUATION = re.compile(r"[.,!?;:]+$")
 
 
 def _cardinal(n: int) -> str:
@@ -86,8 +117,15 @@ def _digits(digits: str) -> str:
     return " ".join(_ONES[int(d)] for d in digits)
 
 
+def _unit(key: str, count: str) -> str:
+    singular, plural = _UNIT_WORDS[key]
+    return singular if count == "1" else plural
+
+
 def _say_number(match: re.Match) -> str:
-    sign, currency, digits, decimals, ordinal = match.groups()
+    sign, currency, digits, decimals, ordinal, suffix = match.groups()
+    suffix = (suffix or "").lower()
+    scale = _SCALE_ABBREVIATIONS.get(suffix) if currency else None
     plain = digits.replace(",", "")
     if len(plain) > 15 or ("," not in digits and plain.startswith("0") and len(plain) > 1):
         # Codes, IDs and phone numbers are read digit by digit.
@@ -104,13 +142,19 @@ def _say_number(match: re.Match) -> str:
     if ordinal:
         spoken = _ordinal(spoken)
     fraction = (decimals or ".")[1:]
-    if fraction and not (currency and len(fraction) == 2):
+    if fraction and not (currency and len(fraction) == 2 and not scale):
         # "$2.5 million" is "two point five million dollars"; only 2 digits are cents
         spoken += " POINT " + _digits(fraction)
         fraction = ""
+    if scale:
+        spoken += " " + scale
     if currency:
-        unit = _CURRENCIES[currency] + ("" if plain == "1" and not decimals else "S")
+        unit = _CURRENCIES[currency] + ("" if plain == "1" and not decimals and not scale else "S")
         spoken = f"{spoken} {unit}" + (f" {_cardinal(int(fraction))}" if fraction.strip("0") else "")
+    if suffix in _UNIT_WORDS:
+        spoken += " " + _unit(suffix, digits if not decimals else "")
+    elif suffix and not scale:
+        spoken += " " + suffix.upper()  # "5m", "5k": left as written
     if sign:
         spoken = "MINUS " + spoken
     return f" {spoken} "
@@ -132,6 +176,12 @@ def _spoken_english(word: str) -> str:
 def _normalize_english(words: Sequence[str]) -> list[str]:
     """Spoken letters for each of `words`, in the order they are said."""
     spoken = [_spoken_english(word).split() for word in words]
+    # A unit written as its own word after a number: "25 lb" is "twenty five pounds".
+    for index in range(1, len(words)):
+        key = _TRAILING_PUNCTUATION.sub("", words[index]).lower()
+        previous = _TRAILING_PUNCTUATION.sub("", words[index - 1])
+        if key in _UNIT_WORDS and any(c.isdigit() for c in previous):
+            spoken[index] = _unit(key, previous).split()
     # "$5 million" is said "five million dollars": the unit follows the scale word.
     for current, following in zip(spoken, spoken[1:]):
         if (
