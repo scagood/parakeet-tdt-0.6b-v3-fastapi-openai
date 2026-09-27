@@ -231,6 +231,15 @@ def test_scores_prefer_the_reading_the_audio_spells():
     assert chunk.best(["t", "ten"], 0.0, 1.0) == 1
 
 
+@pytest.mark.parametrize(("written", "heard"), [("Z", "ZED"), ("Z", "ZEE"), ("H", "HAYCH"), ("H", "AYCH")])
+def test_a_lone_letter_is_timed_the_way_it_was_named(written, heard):
+    # the transcript says "Z" either way; the timing listens for "zee" and "zed"
+    runs = [(BLANK, 2)] + [run for letter in heard for run in ((letter, 3), (BLANK, 1))]
+    chunk = _chunk_hearing(runs, frames=4 * len(heard) + 6)
+    assert chunk._accented(aligner._normalize_english([written]), [(0.0, 1.0)]) == [heard]
+    assert chunk.spans([written])[0] is not None
+
+
 def test_scores_hear_only_their_window():
     # "ten", a pause, then "pence": heard up to the pause "ten" was said; the
     # next word's audio would make it "ten pence".

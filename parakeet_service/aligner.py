@@ -41,6 +41,9 @@ _SAID_AS = {
         "BEE SEE DEE EE EF JEE AYCH JAY KAY EL EM EN PEE KYOO AR ES TEE YOU VEE DOUBLEYOU EX WHY ZEE".split(),
     )),
 }
+# Letter names that depend on the speaker: the audio picks ("zee" or "zed").
+# The transcript keeps the letter either way; only its timing listens for both.
+_ACCENTS = {"ZEE": "ZED", "AYCH": "HAYCH"}
 
 
 def _letters(text: str) -> str:
@@ -385,12 +388,32 @@ class ChunkAligner:
             if not spoken or _mostly_unknown(words, said, self._vocab):
                 return None
             emission, frame_starts = self._emission()
-            return word_spans(
+            timed = word_spans(
                 emission, frame_starts, spoken, len(words), blank=self._blank, separator=self._separator
             )
+            if timed and (accented := self._accented(said, timed)) != said:
+                timed = word_spans(
+                    emission, frame_starts, self._spoken(accented), len(words),
+                    blank=self._blank, separator=self._separator,
+                )
+            return timed
         except Exception:
             logger.exception("word alignment failed; keeping model word times")
             return None
+
+    def _accented(self, said: Sequence[str], timed: Sequence[Optional[Span]]) -> list[str]:
+        """`said` with each lone letter named the way the audio says it ("zee" or
+        "zed"), heard between the words either side of it."""
+        said = list(said)
+        for index, text in enumerate(said):
+            other = " ".join(_ACCENTS.get(part, part) for part in text.split())
+            if other == text or timed[index] is None:
+                continue
+            start = max((span[1] for span in timed[:index] if span), default=0.0)
+            end = min((span[0] for span in timed[index + 1 :] if span), default=float("inf"))
+            default, accent = self.scores([text, other], start, end)
+            said[index] = other if accent > default else text
+        return said
 
     def scores(self, options: Sequence[str], start: float, end: float) -> list[float]:
         """How well each reading in `options` matches the audio between `start`
