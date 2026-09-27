@@ -122,18 +122,34 @@ MODEL_CONFIGS = {
         "quantization": "fp16",
         "description": "FP16 GPU profile (English-only v2)",
     },
-    # ponytail: sketch. onnx_asr loads Whisper too, so enabling it is one entry
-    # here plus the whisper-family handling in model.py/routes.py/chunker.py.
-    # Unverified against a live onnx_asr: batched .recognize() over a list, and
-    # whether .with_timestamps() yields usable token times (see model.py).
-    "whisper-base": {
-        "hf_id": "whisper-base",  # onnx_asr preset; downloads the ONNX export
-        "quantization": None,
-        "description": "Whisper base (multilingual) — sketch",
-        "family": "whisper",
-    },
 }
 # Entries without an explicit "family" are Parakeet TDT; read via config.get.
+
+# Whisper (sketch): onnx_asr loads every onnx-community/whisper-* export, which
+# ships fp32 + fp16 + int8 (plus q4/uint8/bnb4) for each size. The catalog is
+# generated rather than spelled out — repo id, quant and family are formulaic.
+# Naming mirrors the parakeet split: bare name = fp32 default, -fp16 for GPU,
+# -int8 for CPU. English-only sizes carry the .en suffix in the size itself.
+# Still a sketch: onnx_asr's batched .recognize() and whisper timestamp output
+# are unverified, so the whisper-family handling in model.py/routes.py degrades
+# those loudly (30 s chunking, no word timestamps) rather than failing silently.
+_WHISPER_SIZES = (
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+    "medium", "medium.en", "large-v3", "large-v3-turbo",
+)
+_WHISPER_QUANTS = {"": None, "-fp16": "fp16", "-int8": "int8"}
+MODEL_CONFIGS.update(
+    {
+        f"whisper-{size}{suffix}": {
+            "hf_id": f"onnx-community/whisper-{size}",
+            "quantization": quant,
+            "description": f"Whisper {size} (onnx-community, {quant or 'fp32'})",
+            "family": "whisper",
+        }
+        for size in _WHISPER_SIZES
+        for suffix, quant in _WHISPER_QUANTS.items()
+    }
+)
 # Former API names, kept working. Keys are lowercase; lookups are normalized.
 MODEL_ALIASES = {
     "parakeet-v3": "parakeet-v3-fp32",
@@ -143,8 +159,9 @@ MODEL_ALIASES = {
     "parakeet-v2": "parakeet-v2-fp32",
     "parakeet-tdt-0.6b-v2": "parakeet-v2-int8",
     "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
-    # OpenAI clients hard-code model="whisper-1"; map it so they work unchanged.
-    "whisper-1": "whisper-base",
+    # Version-less shortcuts for the sizes people name without the -v3 suffix.
+    "whisper-large": "whisper-large-v3",
+    "whisper-turbo": "whisper-large-v3-turbo",
 }
 # FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so
 # CPU deployments default to FP32. int8 measurably drops words after silences.

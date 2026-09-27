@@ -596,7 +596,9 @@ def _model_card(name: str) -> Dict[str, Any]:
     hf_id = MODEL_CONFIGS[name]["hf_id"]
     if _family(name) == "whisper":
         owned_by = "openai"
-        language = ["auto"]  # multilingual; onnx_asr auto-detects, no selection exposed
+        # .en exports are English-only; the rest auto-detect (no selection exposed).
+        # Key off the repo id, since the model name may carry a quant suffix too.
+        language = ["en"] if hf_id.endswith(".en") else ["auto"]
     else:
         owned_by = hf_id.split("/")[0] if "/" in hf_id else "istupakov"
         language = ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES
