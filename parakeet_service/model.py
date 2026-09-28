@@ -1,8 +1,11 @@
 """Thread-safe ONNX Runtime model loading for Parakeet TDT."""
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 # Import config before ONNX Runtime so thread-pool environment limits are active.
@@ -10,6 +13,7 @@ from .config import (
     GPU_DEVICE_ID,
     MODEL_CACHE_SIZE,
     MODEL_CONFIGS,
+    MODELS_DIR,
     ORT_INTER_THREADS,
     ORT_INTRA_THREADS,
     TARGET_SR,
@@ -21,6 +25,7 @@ from .config import (
 import numpy as np
 import onnx_asr
 import onnxruntime as ort
+from huggingface_hub import hf_hub_download
 
 _ModelKey = Tuple[str, bool]
 _MODELS: "OrderedDict[_ModelKey, object]" = OrderedDict()
@@ -154,6 +159,25 @@ def variant_key(model: str, quantization: str | None = None) -> str:
     return f"{name}:{quant}"
 
 
+def _link_files(variant: Dict[str, Any], folder: Path) -> None:
+    """Fetch a variant's files and link them into `folder` under the names
+    onnx-asr expects (config.MODEL_CONFIGS "files").
+
+    Hard links, not symlinks: onnxruntime resolves a symlinked .onnx to its
+    cache blob and refuses external data that resolves anywhere else (#35).
+    """
+    for name, path in variant["files"].items():
+        blob = os.path.realpath(
+            hf_hub_download(variant["repo"], path, revision=variant["revision"])
+        )
+        try:
+            os.link(blob, folder / name)
+        except OSError:
+            # Cache on another filesystem. Per-repo blobs keep a model and its
+            # data side by side (HF_HUB_DISABLE_SHARED_BLOBS), so this still loads.
+            os.symlink(blob, folder / name)
+
+
 def load_model(key: str, *, with_timestamps: bool = True):
     """Load (or return the cached) model for a variant_key() key."""
     cache_key = (key, with_timestamps)
@@ -166,23 +190,28 @@ def load_model(key: str, *, with_timestamps: bool = True):
 
         name, _, quant = key.partition(":")
         config = MODEL_CONFIGS[name]
-        repo, file_quant = config["quantizations"][quant]
+        variant = config["quantizations"][quant]
         providers = _resolve_providers()
         session_options = _build_sess_options()
         logger.info(
-            "Loading %s (quant=%s) providers=%s intra=%d inter=%d",
-            repo,
-            file_quant,
+            "Loading %s from %s providers=%s intra=%d inter=%d",
+            key,
+            variant["repo"],
             providers,
             ORT_INTRA_THREADS,
             ORT_INTER_THREADS,
         )
-        model = onnx_asr.load_model(
-            repo,
-            quantization=file_quant,
-            providers=providers,
-            sess_options=session_options,
-        )
+        # onnx-asr reads every file while it loads, so the links only need to
+        # live that long; a folder per load keeps replicas sharing the models
+        # volume out of each other's way.
+        with tempfile.TemporaryDirectory(dir=MODELS_DIR, prefix=".load-") as folder:
+            _link_files(variant, Path(folder))
+            model = onnx_asr.load_model(
+                config["onnx_asr_type"],
+                folder,
+                providers=providers,
+                sess_options=session_options,
+            )
         # Verified on onnx_asr 0.12.0 (whisper-tiny): .with_timestamps() works
         # for Whisper, but the standard onnx-community/whisper-* repos carry no
         # alignment heads, so it returns empty tokens/timestamps — text only.

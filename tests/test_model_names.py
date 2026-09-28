@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 from fastapi import HTTPException, params
@@ -77,11 +78,29 @@ def test_whisper_registered_and_card_is_not_parakeet():
 
 
 def test_whisper_quantizations_share_one_repo():
-    assert MODEL_CONFIGS["whisper-small"]["quantizations"] == {
-        "fp32": ("onnx-community/whisper-small", None),
-        "fp16": ("onnx-community/whisper-small", "fp16"),
-        "int8": ("onnx-community/whisper-small", "int8"),
-    }
+    quantizations = MODEL_CONFIGS["whisper-small"]["quantizations"]
+    assert {v["repo"] for v in quantizations.values()} == {"onnx-community/whisper-small"}
+    assert quantizations["fp16"]["files"]["encoder_model.onnx"] == "onnx/encoder_model_fp16.onnx"
+
+
+# What onnx-asr reads from a model folder, by the model type that runs it.
+_ONNX_ASR_FILES = {
+    "nemo-conformer-tdt": {"encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt", "config.json"},
+    "whisper": {"encoder_model.onnx", "decoder_model_merged.onnx", "vocab.json", "added_tokens.json", "config.json"},
+}
+
+
+def test_every_variant_lists_what_its_onnx_asr_type_reads():
+    for name, entry in MODEL_CONFIGS.items():
+        required = _ONNX_ASR_FILES[entry["onnx_asr_type"]]
+        for quant, variant in entry["quantizations"].items():
+            # Pinned to a full commit, so upstream changes arrive only by bumping it.
+            assert re.fullmatch(r"[0-9a-f]{40}", variant["revision"]), (name, quant)
+            files = variant["files"]
+            assert required <= files.keys(), (name, quant)
+            # Anything else is external data, named as its .onnx refers to it.
+            for extra in files.keys() - required:
+                assert ".onnx" in extra and extra.endswith(("data", "_data")), (name, quant, extra)
 
 
 def test_whisper_english_model_reports_en():
