@@ -355,3 +355,71 @@ async def test_a_spoken_numbers_bug_is_never_a_500(calls, speak, monkeypatch, ca
     assert [w["word"] for w in body["words"]] == ["It", "cost", "$5", "today."]
     assert await _batch("It cost $5 today.") == ["It cost $5 today."]
     assert "spoken numbers failed" in caplog.text
+
+
+# --- Whisper word alignment (Whisper returns text only; words come from the
+# --- English aligner, and only when English is known) --------------------------
+
+class _WhisperWorker:
+    """Whisper returns a bare transcript string per chunk: no tokens."""
+
+    async def submit_many(self, pieces, _model_name):
+        return list(pieces)
+
+
+async def _transcribe_whisper(model, *, language=None, align_words=True, text="hello world"):
+    state = _state()
+    state.worker = _WhisperWorker()
+    try:
+        response = await routes.transcribe(
+            request=SimpleNamespace(app=SimpleNamespace(state=state)),
+            file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
+            model=model,
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
+            timestamp_granularities_plain=None,
+            language=language,
+            prompt=None,
+            temperature=None,
+            align_words=align_words,
+            spoken_numbers=None,
+        )
+    finally:
+        state.audio_pool.shutdown()
+        state.align_pool.shutdown()
+    return json.loads(response.body)
+
+
+@pytest.mark.asyncio
+async def test_whisper_english_transcript_is_split_and_aligned(calls):
+    # No tokens, so the words come purely from splitting the text and aligning.
+    body = await _transcribe_whisper("whisper-base", language="en")
+    assert [c["words"] for c in calls] == [WORDS]
+    assert [(w["word"], w["start"], w["end"]) for w in body["words"]] == [
+        ("hello", 0.1, 0.4),
+        ("world", 1.6, 1.9),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_whisper_multilingual_without_language_returns_no_words(calls):
+    # Auto-detect could be any language; never align a multilingual model blindly.
+    body = await _transcribe_whisper("whisper-base", language=None)
+    assert calls == []
+    assert body["words"] is None
+
+
+@pytest.mark.asyncio
+async def test_whisper_english_only_model_aligns_without_language(calls):
+    # A .en model is English by construction, so no language field is needed.
+    body = await _transcribe_whisper("whisper-base.en", language=None)
+    assert [c["words"] for c in calls] == [WORDS]
+    assert body["words"] is not None
+
+
+@pytest.mark.asyncio
+async def test_whisper_words_off_when_align_disabled(calls):
+    # Whisper has no native word times, so align_words=false means no words.
+    body = await _transcribe_whisper("whisper-base", language="en", align_words=False)
+    assert calls == []
+    assert body["words"] is None
