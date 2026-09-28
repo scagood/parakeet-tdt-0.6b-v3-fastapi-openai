@@ -57,7 +57,10 @@ def test_whisper_registered_and_card_is_not_parakeet():
     assert _validate_model("WHISPER-LARGE") == "whisper-large-v3"
     card = routes.retrieve_model("whisper-base")
     assert card["owned_by"] == "openai"
-    assert card["language"] == ["auto"]  # not the Parakeet language list
+    # Whisper's real multilingual set, not the Parakeet list or a bare ["auto"].
+    assert card["language"] == routes._WHISPER_LANGUAGES
+    assert len(card["language"]) == 99 and "zh" in card["language"]
+    assert card["language"] != routes._V3_LANGUAGES
 
 
 def test_whisper_quant_matrix_shares_one_repo():
@@ -73,7 +76,7 @@ def test_whisper_quant_matrix_shares_one_repo():
 
 def test_whisper_english_variant_reports_en_despite_quant_suffix():
     assert routes.retrieve_model("whisper-base.en-int8")["language"] == ["en"]
-    assert routes.retrieve_model("whisper-base")["language"] == ["auto"]
+    assert routes.retrieve_model("whisper-base")["language"] == routes._WHISPER_LANGUAGES
 
 
 def test_chunk_bounds_are_tighter_for_whisper():

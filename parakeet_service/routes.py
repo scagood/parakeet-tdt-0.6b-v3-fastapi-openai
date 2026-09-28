@@ -513,6 +513,12 @@ def _stitch(
             chunk_words = said
             segments[-1]["segment"] = _clean_text(" ".join(w["word"] for w in chunk_words))
 
+        # A text-only result (Whisper) has no tokens, so no word spans exist to
+        # align. When alignment will run, split the transcript into words with
+        # placeholder spans for the aligner to re-time from the audio.
+        if align and not chunk_words and info["text"]:
+            chunk_words = _spread(info["text"].split(), chunk_start, chunk_end)
+
         if align and chunk_words and (timer := chunk()) is not None:
             _apply_alignment(
                 chunk_words,
@@ -589,6 +595,18 @@ _V3_LANGUAGES = [
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
     "uk",
 ]
+# Whisper's 99 languages (multilingual exports); the .en exports are English-only.
+_WHISPER_LANGUAGES = [
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca",
+    "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
+    "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la",
+    "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be",
+    "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn",
+    "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha",
+    "ba", "jw", "su",
+]
 _MODEL_CREATED = 1785888000  # catalog introduction (2026-08-05), fixed for stable output
 
 
@@ -596,9 +614,9 @@ def _model_card(name: str) -> Dict[str, Any]:
     hf_id = MODEL_CONFIGS[name]["hf_id"]
     if _family(name) == "whisper":
         owned_by = "openai"
-        # .en exports are English-only; the rest auto-detect (no selection exposed).
-        # Key off the repo id, since the model name may carry a quant suffix too.
-        language = ["en"] if hf_id.endswith(".en") else ["auto"]
+        # .en exports are English-only; the rest are Whisper's full 99-language
+        # set. Key off the repo id, since the model name may carry a quant suffix.
+        language = ["en"] if hf_id.endswith(".en") else _WHISPER_LANGUAGES
     else:
         owned_by = hf_id.split("/")[0] if "/" in hf_id else "istupakov"
         language = ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES
@@ -650,6 +668,18 @@ def healthz(request: Request):
     return {"status": "ok"}
 
 
+def _whisper_english(model_name: str, language: Optional[str]) -> bool:
+    """Whether a Whisper request may use the (English-only) aligner for word
+    times. Whisper has no native word timing, so we require English to be
+    *known* — an English-only .en model, or an explicit English `language` —
+    never inferred from a multilingual model's auto-detection, which could be
+    any language and would mis-time the audio."""
+    if MODEL_CONFIGS[model_name]["hf_id"].endswith(".en"):
+        return True
+    lang = (language or "").strip()
+    return bool(lang) and aligner.language_code(lang) == "en"
+
+
 def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
     """Say numbers in words: the request's `spoken_numbers`, else the server's
     PARAKEET_SPOKEN_NUMBERS; English only."""
@@ -683,16 +713,16 @@ async def transcribe(
     granularities = set(timestamp_granularities or []) | set(
         timestamp_granularities_plain or []
     )
-    # Word timestamps come from Parakeet's TDT token path; Whisper returns text
-    # only (verified, onnx_asr 0.12.0), so don't run the aligner or surface word
-    # spans for it — forced alignment of the transcript would add them (#26).
-    want_words = (
-        output_format == "verbose_json"
-        and "word" in granularities
-        and family == "parakeet"
-    )
     align = ALIGN_WORDS if align_words is None else align_words
     speak = _speaks(spoken_numbers, language)
+    # Word timestamps: Parakeet emits them from its TDT tokens. Whisper returns
+    # text only, so its words come purely from forced-aligning the transcript,
+    # and only when the language is known English (the aligner is English-only) —
+    # never guessed for a multilingual Whisper request.
+    want_words = output_format == "verbose_json" and "word" in granularities and (
+        family == "parakeet"
+        or (family == "whisper" and align and _whisper_english(model_name, language))
+    )
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
