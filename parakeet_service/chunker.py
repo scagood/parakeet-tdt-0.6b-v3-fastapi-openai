@@ -137,19 +137,28 @@ def _split_oversized(start: int, end: int, target: int, maximum: int) -> List[Ra
     return parts
 
 
-def auto_chunk(wav: np.ndarray) -> List[Range]:
+def auto_chunk(
+    wav: np.ndarray,
+    *,
+    target_sec: float = CHUNK_TARGET_SEC,
+    max_sec: float = CHUNK_MAX_SEC,
+    min_sec: float = CHUNK_MIN_SEC,
+) -> List[Range]:
     """Return ordered, non-empty, bounded ranges in the original waveform.
 
     Short clips bypass VAD. Long clips with no detected speech return no ranges,
     allowing the API to skip expensive ASR inference for silence.
+
+    Bounds default to the Parakeet config globals; callers override them for
+    models with a shorter receptive field (Whisper's fixed 30 s window).
     """
     total = int(wav.size)
     if total <= 0:
         return []
 
-    target = max(1, int(CHUNK_TARGET_SEC * TARGET_SR))
-    maximum = max(target, int(CHUNK_MAX_SEC * TARGET_SR))
-    minimum = max(0, int(CHUNK_MIN_SEC * TARGET_SR))
+    target = max(1, int(target_sec * TARGET_SR))
+    maximum = max(target, int(max_sec * TARGET_SR))
+    minimum = max(0, int(min_sec * TARGET_SR))
     if total <= maximum:
         return [(0, total)]
 

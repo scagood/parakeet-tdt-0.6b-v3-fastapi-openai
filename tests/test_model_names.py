@@ -51,6 +51,38 @@ def test_models_endpoint_retrieve_resolves_aliases():
     assert err.value.status_code == 404
 
 
+def test_whisper_registered_and_card_is_not_parakeet():
+    assert "whisper-base" in MODEL_CONFIGS
+    assert _validate_model("whisper-turbo") == "whisper-large-v3-turbo"  # alias
+    assert _validate_model("WHISPER-LARGE") == "whisper-large-v3"
+    card = routes.retrieve_model("whisper-base")
+    assert card["owned_by"] == "openai"
+    assert card["language"] == ["auto"]  # not the Parakeet language list
+
+
+def test_whisper_quant_matrix_shares_one_repo():
+    # Bare name = fp32 default; -fp16 (GPU) and -int8 (CPU) mirror the parakeet split.
+    assert MODEL_CONFIGS["whisper-small"]["quantization"] is None
+    assert MODEL_CONFIGS["whisper-small-fp16"]["quantization"] == "fp16"
+    assert MODEL_CONFIGS["whisper-small-int8"]["quantization"] == "int8"
+    repos = {
+        MODEL_CONFIGS[f"whisper-small{s}"]["hf_id"] for s in ("", "-fp16", "-int8")
+    }
+    assert repos == {"onnx-community/whisper-small"}
+
+
+def test_whisper_english_variant_reports_en_despite_quant_suffix():
+    assert routes.retrieve_model("whisper-base.en-int8")["language"] == ["en"]
+    assert routes.retrieve_model("whisper-base")["language"] == ["auto"]
+
+
+def test_chunk_bounds_are_tighter_for_whisper():
+    p_target, p_max, _ = routes._chunk_bounds("parakeet")
+    w_target, w_max, _ = routes._chunk_bounds("whisper")
+    assert w_max <= 30.0 < p_max
+    assert w_target < p_target
+
+
 def test_explicit_default_skips_probe(monkeypatch):
     from parakeet_service import model as m
 

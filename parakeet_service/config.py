@@ -123,6 +123,36 @@ MODEL_CONFIGS = {
         "description": "FP16 GPU profile (English-only v2)",
     },
 }
+# Entries without an explicit "family" are Parakeet TDT; read via config.get.
+
+# Whisper (sketch): onnx_asr loads every onnx-community/whisper-* export, which
+# ships fp32 + fp16 + int8 (plus q4/uint8/bnb4) for each size. The catalog is
+# generated rather than spelled out — repo id, quant and family are formulaic.
+# Naming mirrors the parakeet split: bare name = fp32 default, -fp16 for GPU,
+# -int8 for CPU. English-only sizes carry the .en suffix in the size itself.
+# Verified on onnx_asr 0.12.0 (whisper-tiny, CPU): fp32/fp16/int8 all load and
+# transcribe, and batched .recognize([...]) returns a list (the GPU batch path
+# is safe). The standard repos return text only — no token timestamps — so the
+# whisper handling in model.py/routes.py yields text + 30 s-chunked coarse
+# segment times, no word timestamps. That is a correct result, not a stub; word
+# timestamps would come from forced alignment of the transcript (see #26).
+_WHISPER_SIZES = (
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+    "medium", "medium.en", "large-v3", "large-v3-turbo",
+)
+_WHISPER_QUANTS = {"": None, "-fp16": "fp16", "-int8": "int8"}
+MODEL_CONFIGS.update(
+    {
+        f"whisper-{size}{suffix}": {
+            "hf_id": f"onnx-community/whisper-{size}",
+            "quantization": quant,
+            "description": f"Whisper {size} (onnx-community, {quant or 'fp32'})",
+            "family": "whisper",
+        }
+        for size in _WHISPER_SIZES
+        for suffix, quant in _WHISPER_QUANTS.items()
+    }
+)
 # Former API names, kept working. Keys are lowercase; lookups are normalized.
 MODEL_ALIASES = {
     "parakeet-v3": "parakeet-v3-fp32",
@@ -132,6 +162,9 @@ MODEL_ALIASES = {
     "parakeet-v2": "parakeet-v2-fp32",
     "parakeet-tdt-0.6b-v2": "parakeet-v2-int8",
     "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
+    # Version-less shortcuts for the sizes people name without the -v3 suffix.
+    "whisper-large": "whisper-large-v3",
+    "whisper-turbo": "whisper-large-v3-turbo",
 }
 # FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so
 # CPU deployments default to FP32. int8 measurably drops words after silences.
@@ -163,6 +196,13 @@ if not CHUNK_MIN_SEC <= CHUNK_TARGET_SEC <= CHUNK_MAX_SEC:
         "chunk durations must satisfy PARAKEET_CHUNK_MIN_SEC <= "
         "PARAKEET_CHUNK_TARGET_SEC <= PARAKEET_CHUNK_MAX_SEC"
     )
+
+# Whisper's encoder consumes a fixed 30 s mel window; audio past 30 s in a
+# single input is silently dropped by the ONNX export. Parakeet has no such
+# limit (hence the 60/75 s defaults above), so whisper-family models must be
+# chunked tighter or every long chunk loses its tail without any error.
+WHISPER_CHUNK_MAX_SEC = 30.0
+WHISPER_CHUNK_TARGET_SEC = 25.0
 
 # Silence gaps at least this long are cut out of chunks instead of being fed
 # to the model; long in-chunk silence measurably degrades recognition of the

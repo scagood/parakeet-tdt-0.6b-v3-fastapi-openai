@@ -60,6 +60,20 @@ def test_long_silence_gap_is_cut_out_of_chunks(monkeypatch):
     assert not any(start < 40 * sr and end > 10 * sr for start, end in ranges[1:])
 
 
+def test_bounds_override_caps_chunks(monkeypatch):
+    # Whisper path: 90 s of continuous speech must chunk to <=30 s pieces, not
+    # the 75 s Parakeet default (which would silently truncate under Whisper).
+    sr = chunker.TARGET_SR
+    total = int(90 * sr)
+    monkeypatch.setattr(chunker, "_silero_speech_segments", lambda _wav: [(0, total)])
+    ranges = chunker.auto_chunk(
+        np.ones(total, dtype=np.float32), target_sec=25.0, max_sec=30.0, min_sec=20.0
+    )
+    _assert_valid(ranges, total, int(30.0 * sr))
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == total
+
+
 def test_slice_chunks_returns_views():
     waveform = np.arange(20, dtype=np.float32)
     pieces = chunker.slice_chunks(waveform, [(2, 8), (8, 12)])

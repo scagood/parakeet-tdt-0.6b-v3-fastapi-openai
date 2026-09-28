@@ -199,7 +199,14 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
             providers=providers,
             sess_options=session_options,
         )
-        if with_timestamps:
+        # Verified on onnx_asr 0.12.0 (whisper-tiny): .with_timestamps() works
+        # for Whisper, but the standard onnx-community/whisper-* repos carry no
+        # alignment heads, so it returns empty tokens/timestamps — text only.
+        # The token/timestamp shape _stitch consumes is Parakeet TDT's anyway,
+        # so keep Whisper on the plain text adapter (its .recognize() returns the
+        # transcript string). Whisper word times would come from forced-aligning
+        # that transcript against the audio, not from the model.
+        if with_timestamps and config.get("family", "parakeet") == "parakeet":
             model = model.with_timestamps()
         _validate_gpu_binding(normalized, model)
         _MODELS[key] = model
