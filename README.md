@@ -267,6 +267,39 @@ transcript = client.audio.transcriptions.create(
 )
 ```
 
+#### Your own model catalog
+
+The models above are defined in [`parakeet_service/models.yaml`](parakeet_service/models.yaml):
+per model its family, languages and chunk lengths, and per quantization a
+Hugging Face repo, a pinned commit and the exact files to load. To serve a
+different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
+another file of the same shape. It **replaces** the built-in catalog, so copy
+the built-in file and edit it. The file is checked at startup and the service
+refuses to start on a mistake, naming it; it is read only then, so restart
+after changing it.
+
+On Kubernetes, keep it in a ConfigMap:
+
+```bash
+kubectl create configmap parakeet-models --from-file=models.yaml=parakeet_service/models.yaml
+```
+
+```yaml
+# in the Deployment's pod spec
+containers:
+  - name: parakeet
+    env:
+      - name: PARAKEET_MODEL_CATALOG
+        value: /config/models.yaml
+    volumeMounts:
+      - name: model-catalog
+        mountPath: /config
+volumes:
+  - name: model-catalog
+    configMap:
+      name: parakeet-models
+```
+
 ### Response formats
 
 `response_format` accepts `json` (default), `text`, `srt`, `vtt` and

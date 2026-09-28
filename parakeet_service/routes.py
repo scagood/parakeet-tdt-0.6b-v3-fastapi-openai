@@ -152,7 +152,7 @@ def _family(model_name: str) -> str:
 
 
 def _chunk_bounds(model_name: str) -> Tuple[float, float, float]:
-    """(target, max, min) seconds for chunking this model (config.MODEL_CONFIGS)."""
+    """(target, max, min) seconds for chunking this model (models.yaml)."""
     config = MODEL_CONFIGS[model_name]
     target = config["chunk_target_sec"]
     return target, config["chunk_max_sec"], min(CHUNK_MIN_SEC, target)

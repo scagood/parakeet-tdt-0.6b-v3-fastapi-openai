@@ -47,6 +47,7 @@ docker run -d --name parakeet-gpu -p 5092:5092 --gpus all \
 |----------|---------|-------------|
 | `HF_HOME` | `/app/models` | HuggingFace model cache |
 | `HF_HUB_CACHE` | `/app/models` | HuggingFace hub cache |
+| `PARAKEET_MODEL_CATALOG` | built-in `parakeet_service/models.yaml` | YAML file that replaces the model catalog (e.g. a mounted ConfigMap); validated at startup. See the README's "Your own model catalog". |
 | `PARAKEET_PRELOAD_MODELS` | empty | Comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before `/healthz` reports ready, e.g. `parakeet-v3` or `parakeet-v3:fp16`. Requests must still name `model=`. |
 
 ### Persistent Model Cache

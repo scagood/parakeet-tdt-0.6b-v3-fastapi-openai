@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import inspect
-import re
 
 import pytest
 from fastapi import HTTPException, params
 
-from parakeet_service import config, routes
+from parakeet_service import routes
 from parakeet_service.config import MODEL_CONFIGS
 from parakeet_service.model import variant_key
 from parakeet_service.routes import _validate_model
@@ -34,9 +33,6 @@ def test_unknown_model_rejected():
 def test_quantization_defaults_to_fp32_whatever_the_hardware():
     assert variant_key("parakeet-v3") == "parakeet-v3:fp32"
     assert variant_key("Whisper-Tiny", "FP16") == "whisper-tiny:fp16"
-    # fp32 is the default, so every model must have it.
-    for name, entry in MODEL_CONFIGS.items():
-        assert "fp32" in entry["quantizations"], name
 
 
 def test_unknown_quantization_is_a_400_naming_the_choices():
@@ -72,9 +68,8 @@ def test_whisper_registered_and_card_is_not_parakeet():
     card = routes.retrieve_model("whisper-base")
     assert card["owned_by"] == "openai"
     # Whisper's real multilingual set, not the Parakeet list or a bare ["auto"].
-    assert card["language"] == config._WHISPER_LANGUAGES
-    assert len(card["language"]) == 99 and "zh" in card["language"]
-    assert card["language"] != config._V3_LANGUAGES
+    assert len(card["language"]) == 99 and "zh" in card["language"] and "no" in card["language"]
+    assert card["language"] != MODEL_CONFIGS["parakeet-v3"]["languages"]
 
 
 def test_whisper_quantizations_share_one_repo():
@@ -83,29 +78,9 @@ def test_whisper_quantizations_share_one_repo():
     assert quantizations["fp16"]["files"]["encoder_model.onnx"] == "onnx/encoder_model_fp16.onnx"
 
 
-# What onnx-asr reads from a model folder, by the model type that runs it.
-_ONNX_ASR_FILES = {
-    "nemo-conformer-tdt": {"encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt", "config.json"},
-    "whisper": {"encoder_model.onnx", "decoder_model_merged.onnx", "vocab.json", "added_tokens.json", "config.json"},
-}
-
-
-def test_every_variant_lists_what_its_onnx_asr_type_reads():
-    for name, entry in MODEL_CONFIGS.items():
-        required = _ONNX_ASR_FILES[entry["onnx_asr_type"]]
-        for quant, variant in entry["quantizations"].items():
-            # Pinned to a full commit, so upstream changes arrive only by bumping it.
-            assert re.fullmatch(r"[0-9a-f]{40}", variant["revision"]), (name, quant)
-            files = variant["files"]
-            assert required <= files.keys(), (name, quant)
-            # Anything else is external data, named as its .onnx refers to it.
-            for extra in files.keys() - required:
-                assert ".onnx" in extra and extra.endswith(("data", "_data")), (name, quant, extra)
-
-
 def test_whisper_english_model_reports_en():
     assert routes.retrieve_model("whisper-base.en")["language"] == ["en"]
-    assert routes.retrieve_model("whisper-base")["language"] == config._WHISPER_LANGUAGES
+    assert routes.retrieve_model("whisper-base")["language"] == MODEL_CONFIGS["whisper-base"]["languages"]
 
 
 def test_chunk_bounds_are_tighter_for_whisper_and_parakeet_v2():
@@ -114,8 +89,3 @@ def test_chunk_bounds_are_tighter_for_whisper_and_parakeet_v2():
         target, maximum, _ = routes._chunk_bounds(name)
         assert maximum <= 30.0 < p_max
         assert target < p_target
-
-
-def test_every_model_states_its_chunk_bounds():
-    for name, entry in MODEL_CONFIGS.items():
-        assert 0 < entry["chunk_target_sec"] <= entry["chunk_max_sec"], name

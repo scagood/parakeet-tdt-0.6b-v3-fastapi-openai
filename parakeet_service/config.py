@@ -8,9 +8,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
+
+import yaml
 
 
 # Set numeric-library limits before importing NumPy/ONNX Runtime in other modules.
@@ -96,560 +99,90 @@ if HF_OFFLINE:
     # base image that exports HF_HUB_OFFLINE=0.
     os.environ["HF_HUB_OFFLINE"] = "1"
 
-# parakeet-tdt-0.6b-v3 language coverage; v2 is English-only.
-_V3_LANGUAGES = [
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
-    "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
-    "uk",
-]
-# Whisper's 99 languages (multilingual exports); the .en exports are English-only.
-_WHISPER_LANGUAGES = [
-    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca",
-    "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
-    "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la",
-    "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
-    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
-    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be",
-    "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn",
-    "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha",
-    "ba", "jw", "su",
-]
+# The model catalog: every model the service serves, and how to load each
+# precision of it. The entries are data, in models.yaml next to this file, or in
+# the YAML file PARAKEET_MODEL_CATALOG names (a k8s ConfigMap, say), which then
+# replaces the built-in catalog wholesale. Either way it is validated here, so a
+# broken catalog stops the service at startup rather than at a request.
 
-# One entry per model: what every precision of it shares (family, the
-# onnx-asr model type that runs it, languages, chunk lengths) and, per
-# quantization, the repo, the commit it is pinned to, and the files to take from
-# it. An upstream change reaches us only when a revision is bumped. "files" maps
-# the name onnx-asr expects (https://github.com/istupakov/onnx-asr) to the
-# file's path in the repo; external-data files keep the name their .onnx refers
-# to. Nothing is looked up by pattern: a file missing here is not loaded. A
-# request names the model and may pick a quantization; without one it gets
-# fp32, the reference precision, whatever the hardware. FP16 halves VRAM
-# (identical output measured on Parakeet v3) but ONNX Runtime upcasts it on CPU,
-# which is slower; int8 measurably drops words after silences.
-#
-# Whisper repos are onnx-community's except where its export is broken (#35):
-# the bare medium and large-v3 repos are empty (the exports live under -ONNX),
-# there is no medium.en, and the .en fp16 merged decoders fail onnxruntime's
-# graph check. Those come from Xenova, whose 8-bit files are _quantized (it has
-# no int8 encoder); Xenova's medium.en also carries a stale 2023-05
-# decoder_model_merged.onnx_data that its self-contained decoder never reads.
-# The Whisper encoder sees a fixed 30 s window and the export silently drops
-# audio past it, so a longer chunk would lose its tail. Whisper returns text
-# only; word times come from forced alignment of the transcript (#26).
-MODEL_CONFIGS = {
-    "parakeet-v3": {
-        "family": "parakeet",
-        "onnx_asr_type": "nemo-conformer-tdt",
-        "languages": _V3_LANGUAGES,
-        "chunk_target_sec": 60.0,
-        "chunk_max_sec": 75.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "istupakov/parakeet-tdt-0.6b-v3-onnx",
-                "revision": "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.onnx",
-                    "encoder-model.onnx.data": "encoder-model.onnx.data",
-                    "decoder_joint-model.onnx": "decoder_joint-model.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "grikdotnet/parakeet-tdt-0.6b-fp16",
-                "revision": "dc9871ec5ad84a420940077e76e8741b3609bf8b",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.fp16.onnx",
-                    "decoder_joint-model.onnx": "decoder_joint-model.fp16.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "istupakov/parakeet-tdt-0.6b-v3-onnx",
-                "revision": "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.int8.onnx",
-                    "decoder_joint-model.onnx": "decoder_joint-model.int8.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "parakeet-v2": {
-        "family": "parakeet",
-        "onnx_asr_type": "nemo-conformer-tdt",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "istupakov/parakeet-tdt-0.6b-v2-onnx",
-                "revision": "0bbb45a3365852604aef28b538a8f066f4ccaa85",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.onnx",
-                    "encoder-model.onnx.data": "encoder-model.onnx.data",
-                    "decoder_joint-model.onnx": "decoder_joint-model.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "ysdede/parakeet-tdt-0.6b-v2-onnx",
-                "revision": "db4a768f5795e0f508187a34241fbeeef6ebb0d3",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.fp16.onnx",
-                    "decoder_joint-model.onnx": "decoder_joint-model.fp16.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "istupakov/parakeet-tdt-0.6b-v2-onnx",
-                "revision": "0bbb45a3365852604aef28b538a8f066f4ccaa85",
-                "files": {
-                    "encoder-model.onnx": "encoder-model.int8.onnx",
-                    "decoder_joint-model.onnx": "decoder_joint-model.int8.onnx",
-                    "vocab.txt": "vocab.txt",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-tiny": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-tiny",
-                "revision": "ff4177021cc41f7db950912b73ea4fdf7d01d8e7",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-tiny",
-                "revision": "ff4177021cc41f7db950912b73ea4fdf7d01d8e7",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-tiny",
-                "revision": "ff4177021cc41f7db950912b73ea4fdf7d01d8e7",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-tiny.en": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-tiny.en",
-                "revision": "2575352d61be1bf7225cf8f8b268a4678025fc58",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "Xenova/whisper-tiny.en",
-                "revision": "79fb389fc764e7c395bd330e9531d9d32ada7049",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-tiny.en",
-                "revision": "2575352d61be1bf7225cf8f8b268a4678025fc58",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-base": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-base",
-                "revision": "1846881b6b3a3024392c1eea3ad983695bc23925",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-base",
-                "revision": "1846881b6b3a3024392c1eea3ad983695bc23925",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-base",
-                "revision": "1846881b6b3a3024392c1eea3ad983695bc23925",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-base.en": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-base.en",
-                "revision": "51eefc0af78b103839eda9e7e4f4186acc6517fe",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "Xenova/whisper-base.en",
-                "revision": "95bf40a508535962c6483ead40270b2e32267508",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-base.en",
-                "revision": "51eefc0af78b103839eda9e7e4f4186acc6517fe",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-small": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-small",
-                "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-small",
-                "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-small",
-                "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-small.en": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-small.en",
-                "revision": "482fb8ba081b6e906f92efe103622316b2a0cc69",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "Xenova/whisper-small.en",
-                "revision": "fa16a75f5d91e83ecb6a2ccb690f14d91ef00ca4",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-small.en",
-                "revision": "482fb8ba081b6e906f92efe103622316b2a0cc69",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-medium": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-medium-ONNX",
-                "revision": "d3978248a6b5de6df7ec29ddfbde3993845fa806",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-medium-ONNX",
-                "revision": "d3978248a6b5de6df7ec29ddfbde3993845fa806",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-medium-ONNX",
-                "revision": "d3978248a6b5de6df7ec29ddfbde3993845fa806",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-medium.en": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "Xenova/whisper-medium.en",
-                "revision": "4fbcf6e6deb6b1af698e6925bfe00730bd4be715",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "Xenova/whisper-medium.en",
-                "revision": "4fbcf6e6deb6b1af698e6925bfe00730bd4be715",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "Xenova/whisper-medium.en",
-                "revision": "4fbcf6e6deb6b1af698e6925bfe00730bd4be715",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_quantized.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_quantized.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-large-v3": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-large-v3-ONNX",
-                "revision": "3b6257ad5e67aa523c7c07f4fea04d445eecc4a6",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "encoder_model.onnx_data": "onnx/encoder_model.onnx_data",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "decoder_model_merged.onnx_data": "onnx/decoder_model_merged.onnx_data",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-large-v3-ONNX",
-                "revision": "3b6257ad5e67aa523c7c07f4fea04d445eecc4a6",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-large-v3-ONNX",
-                "revision": "3b6257ad5e67aa523c7c07f4fea04d445eecc4a6",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
-    "whisper-large-v3-turbo": {
-        "family": "whisper",
-        "onnx_asr_type": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": {
-                "repo": "onnx-community/whisper-large-v3-turbo",
-                "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model.onnx",
-                    "encoder_model.onnx_data": "onnx/encoder_model.onnx_data",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "fp16": {
-                "repo": "onnx-community/whisper-large-v3-turbo",
-                "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_fp16.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_fp16.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-            "int8": {
-                "repo": "onnx-community/whisper-large-v3-turbo",
-                "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
-                "files": {
-                    "encoder_model.onnx": "onnx/encoder_model_int8.onnx",
-                    "decoder_model_merged.onnx": "onnx/decoder_model_merged_int8.onnx",
-                    "vocab.json": "vocab.json",
-                    "added_tokens.json": "added_tokens.json",
-                    "config.json": "config.json",
-                },
-            },
-        },
-    },
+# What onnx-asr reads from a model folder, by the model type that runs it.
+ONNX_ASR_FILES = {
+    "nemo-conformer-tdt": {"encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt", "config.json"},
+    "whisper": {"encoder_model.onnx", "decoder_model_merged.onnx", "vocab.json", "added_tokens.json", "config.json"},
 }
-# Every entry lists the languages it transcribes: served on its model card, and
-# ["en"] marks an English-only model whose word times the aligner may take.
-# Every entry states the chunk length long audio is cut to: "chunk_target_sec"
-# preferred, "chunk_max_sec" at most (and audio no longer than that is not cut
-# at all). Parakeet v2, fp32 and int8 alike, hears whole stretches of clear
-# speech in a chunk of 45 s or more as silence, which ones depending
-# chaotically on where the chunk starts; no 20 or 30 s chunk did (#36).
-# Parakeet v3 is the other way round: it loses more speech in 20-30 s chunks
-# than in 60 s ones.
+# How routes.py treats a model's output: Parakeet's TDT tokens carry word times,
+# Whisper returns text only.
+MODEL_FAMILIES = {"parakeet", "whisper"}
+_KEYS = {"family", "onnx_asr_type", "languages", "chunk_target_sec", "chunk_max_sec", "quantizations"}
+_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def validate_catalog(models: Dict[str, Any]) -> None:
+    """Raise ValueError naming the first thing wrong with a catalog's models."""
+    if not isinstance(models, dict) or not models:
+        raise ValueError("`models` must map model names to entries")
+    for name, entry in models.items():
+        # Requests are matched lowercased, so a mixed-case name could never be asked for.
+        if not isinstance(name, str) or name != name.lower():
+            raise ValueError(f"{name!r}: model names must be lowercase strings")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{name}: an entry must be a mapping")
+        if missing := _KEYS - entry.keys():
+            raise ValueError(f"{name}: missing {sorted(missing)}")
+        if not isinstance(entry["family"], str) or entry["family"] not in MODEL_FAMILIES:
+            raise ValueError(f"{name}: family {entry['family']!r} is not one of {sorted(MODEL_FAMILIES)}")
+        required = ONNX_ASR_FILES.get(entry["onnx_asr_type"]) if isinstance(entry["onnx_asr_type"], str) else None
+        if required is None:
+            raise ValueError(
+                f"{name}: onnx_asr_type {entry['onnx_asr_type']!r} is not one of {sorted(ONNX_ASR_FILES)}"
+            )
+        languages = entry["languages"]
+        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
+            # A bare `no` (Norwegian) arrives as False: quote language codes.
+            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
+        target, maximum = entry["chunk_target_sec"], entry["chunk_max_sec"]
+        if not all(isinstance(x, (int, float)) for x in (target, maximum)) or not 0 < target <= maximum:
+            raise ValueError(f"{name}: need 0 < chunk_target_sec <= chunk_max_sec")
+        quantizations = entry["quantizations"]
+        if not isinstance(quantizations, dict) or "fp32" not in quantizations:
+            raise ValueError(f"{name}: quantizations must include fp32, the default")
+        graphs = [f for f in required if f.endswith(".onnx")]
+        for quant, variant in quantizations.items():
+            where = f"{name}:{quant}"
+            if not isinstance(quant, str) or quant != quant.lower():
+                raise ValueError(f"{where}: quantization names must be lowercase strings")
+            if not isinstance(variant, dict) or not isinstance(variant.get("repo"), str):
+                raise ValueError(f"{where}: needs a repo")
+            # Quote it: an unquoted SHA can load as a number.
+            if not isinstance(variant.get("revision"), str) or not _REVISION.fullmatch(variant["revision"]):
+                raise ValueError(f"{where}: revision must be a quoted 40-character commit SHA")
+            files = variant.get("files")
+            if not isinstance(files, dict) or not all(isinstance(x, str) for x in (*files, *files.values())):
+                raise ValueError(f"{where}: files must map onnx-asr names to repo paths")
+            if missing := required - files.keys():
+                raise ValueError(f"{where}: files is missing {sorted(missing)}")
+            for extra in files.keys() - required:
+                # Anything else is external data (possibly sharded, .data.000),
+                # named as its .onnx refers to it.
+                if not (any(extra.startswith(g) for g in graphs) and "data" in extra):
+                    raise ValueError(f"{where}: {extra!r} is neither a file onnx-asr reads nor external data")
+
+
+def load_catalog(path: Path) -> Dict[str, Any]:
+    """Read and validate a catalog file; return its models."""
+    with open(path, encoding="utf-8") as handle:
+        catalog = yaml.safe_load(handle)
+    try:
+        if not isinstance(catalog, dict):
+            raise ValueError("expected a mapping with a `models` key")
+        validate_catalog(catalog.get("models"))
+    except ValueError as exc:
+        raise RuntimeError(f"invalid model catalog {path}: {exc}") from None
+    return catalog["models"]
+
+
+CATALOG_PATH = Path(os.getenv("PARAKEET_MODEL_CATALOG") or Path(__file__).with_name("models.yaml"))
+MODEL_CONFIGS = load_catalog(CATALOG_PATH)
 
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
 
@@ -668,7 +201,7 @@ PRELOAD_MODELS = [
 # ---------------------------------------------------------------------------
 TARGET_SR = 16_000
 
-# Chunk lengths are per model (MODEL_CONFIGS). This is the shortest chunk cut
+# Chunk lengths are per model (models.yaml). This is the shortest chunk cut
 # at a pause, capped at the model's own target.
 CHUNK_MIN_SEC = _env_float("PARAKEET_CHUNK_MIN_SEC", 20.0, minimum=0.0)
 

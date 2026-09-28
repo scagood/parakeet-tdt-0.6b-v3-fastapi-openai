@@ -160,7 +160,7 @@ def variant_key(model: str, quantization: str | None = None) -> str:
 
 def _link_files(variant: Dict[str, Any], folder: Path) -> None:
     """Fetch a variant's files and link them into `folder` under the names
-    onnx-asr expects (config.MODEL_CONFIGS "files").
+    onnx-asr expects (models.yaml "files").
 
     Hard links, not symlinks: onnxruntime resolves a symlinked .onnx to its
     cache blob and refuses external data that resolves anywhere else (#35).

@@ -147,7 +147,7 @@ def auto_chunk(
     Short clips bypass VAD. Long clips with no detected speech return no ranges,
     allowing the API to skip expensive ASR inference for silence.
 
-    Bounds are the model's own (config.MODEL_CONFIGS).
+    Bounds are the model's own (models.yaml).
     """
     total = int(wav.size)
     if total <= 0:
