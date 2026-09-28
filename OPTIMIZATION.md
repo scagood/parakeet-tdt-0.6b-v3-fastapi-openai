@@ -82,10 +82,12 @@ changing code" and "identify bottlenecks with evidence":
   and stdlib `wave` + numpy for WAVs already at 16 kHz. Removes per-chunk
   subprocess fork/exec.
 - **Silero-VAD auto-chunking** (`parakeet_service/chunker.py`): pack speech
-  segments into 60 s targets, cutting on pause midpoints, with min/max
-  guards. Falls back to energy-RMS when silero-vad is unavailable.
-  - Bypasses chunking entirely for clips ≤ `CHUNK_MAX_SEC` (75 s by
-    default), so 10 s and 60 s files are processed in a single ORT call.
+  segments into each model's target chunk length (60 s for Parakeet v3),
+  cutting on pause midpoints, with min/max guards. Falls back to energy-RMS
+  when silero-vad is unavailable.
+  - Bypasses chunking entirely for clips no longer than the model's
+    `chunk_max_sec` (75 s for Parakeet v3), so 10 s and 60 s files are
+    processed in a single ORT call.
 - **Parallel `InferencePool`** (`parakeet_service/batchworker.py`):
   4 worker threads, each calling `model.recognize(single_wav)`. Used for
   both concurrent requests *and* fan-out of multiple chunks from one long
@@ -182,8 +184,6 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU      |
 | `PARAKEET_USE_GPU`         | `true`       | `true` / `auto` / `false`                                |
 | `PARAKEET_GPU_DEVICE_ID`   | `0`          | CUDA device for ORT                                      |
-| `PARAKEET_CHUNK_TARGET_SEC`| `60`         | preferred chunk length                                   |
-| `PARAKEET_CHUNK_MAX_SEC`   | `75`         | hard cap before force-cut; ≤ this skips chunking         |
 | `PARAKEET_CHUNK_MIN_SEC`   | `20`         | min chunk length before merge                            |
 | `PARAKEET_CHUNK_TRIM_SILENCE_SEC` | `3`   | silence gaps at least this long are cut out of a chunk   |
 | `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
@@ -201,6 +201,12 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_WARMUP_TIMEOUT_SEC` | `120`     | warm-up bound; a failed or timed-out warm-up fails startup |
 | `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
 | `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
+
+Chunk lengths are per model (`chunk_target_sec` / `chunk_max_sec` in
+`MODEL_CONFIGS`), not configurable: Parakeet v3 chunks at 60/75 s, Whisper and
+Parakeet v2 at 25/30 s. Whisper's encoder only sees 30 s, and Parakeet v2 drops
+whole stretches of speech from chunks of 45 s or more
+([#36](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/36)).
 
 Request limits, all rejected with `413`:
 

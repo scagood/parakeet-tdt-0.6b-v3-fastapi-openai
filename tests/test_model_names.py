@@ -79,11 +79,17 @@ def test_whisper_english_variant_reports_en_despite_quant_suffix():
     assert routes.retrieve_model("whisper-base")["language"] == routes._WHISPER_LANGUAGES
 
 
-def test_chunk_bounds_are_tighter_for_whisper():
-    p_target, p_max, _ = routes._chunk_bounds("parakeet")
-    w_target, w_max, _ = routes._chunk_bounds("whisper")
-    assert w_max <= 30.0 < p_max
-    assert w_target < p_target
+def test_chunk_bounds_are_tighter_for_whisper_and_parakeet_v2():
+    p_target, p_max, _ = routes._chunk_bounds("parakeet-v3-fp32")
+    for name in ("whisper-base", "parakeet-v2-int8", "parakeet-v2-fp32"):
+        target, maximum, _ = routes._chunk_bounds(name)
+        assert maximum <= 30.0 < p_max
+        assert target < p_target
+
+
+def test_every_model_states_its_chunk_bounds():
+    for name, config in MODEL_CONFIGS.items():
+        assert 0 < config["chunk_target_sec"] <= config["chunk_max_sec"], name
 
 
 def test_explicit_default_skips_probe(monkeypatch):
