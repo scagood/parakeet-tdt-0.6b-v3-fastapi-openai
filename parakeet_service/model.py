@@ -7,12 +7,7 @@ from typing import Any, Dict, List, Tuple
 
 # Import config before ONNX Runtime so thread-pool environment limits are active.
 from .config import (
-    CPU_DEFAULT_MODEL,
-    DEFAULT_MODEL,
-    DEFAULT_MODEL_EXPLICIT,
-    GPU_DEFAULT_MODEL,
     GPU_DEVICE_ID,
-    MODEL_ALIASES,
     MODEL_CACHE_SIZE,
     MODEL_CONFIGS,
     ORT_INTER_THREADS,
@@ -140,65 +135,51 @@ def _validate_gpu_binding(name: str, model: Any) -> None:
         )
 
 
-_DEFAULT_MODEL_NAME: str | None = None
+def variant_key(model: str, quantization: str | None = None) -> str:
+    """Resolve a model and optional quantization to its "model:quant" key.
 
-
-def default_model_name() -> str:
-    """Return the default model, probing CUDA availability when USE_GPU=auto.
-
-    Resolved once, on first use (i.e. at startup, not import), so the answer
-    reflects whether CUDA libraries actually load on this host.
+    Without a quantization the answer is fp32, the reference precision, never
+    something picked from the hardware: the same request gets the same numbers
+    on every deployment. Raises ValueError naming the valid choices.
     """
-    global _DEFAULT_MODEL_NAME
-    if _DEFAULT_MODEL_NAME is None:
-        if DEFAULT_MODEL_EXPLICIT:
-            name = DEFAULT_MODEL
-        elif USE_GPU == "false":
-            name = CPU_DEFAULT_MODEL
-        elif USE_GPU == "true":
-            name = GPU_DEFAULT_MODEL
-        else:  # auto: pick by what this host can actually run
-            has_cuda = (
-                _preload_cuda_libraries()
-                and "CUDAExecutionProvider" in ort.get_available_providers()
-            )
-            name = GPU_DEFAULT_MODEL if has_cuda else CPU_DEFAULT_MODEL
-            logger.info(
-                "USE_GPU=auto: CUDA %s; default model %s",
-                "available" if has_cuda else "unavailable",
-                name,
-            )
-        _DEFAULT_MODEL_NAME = name
-    return _DEFAULT_MODEL_NAME
+    name = model.strip().lower()
+    if name not in MODEL_CONFIGS:
+        raise ValueError(f"Unknown model {model!r}. Available models: {sorted(MODEL_CONFIGS)}")
+    quant = (quantization or "fp32").strip().lower()
+    available = MODEL_CONFIGS[name]["quantizations"]
+    if quant not in available:
+        raise ValueError(
+            f"Model {name!r} has no {quant!r} quantization. Available: {list(available)}"
+        )
+    return f"{name}:{quant}"
 
 
-def load_model(name: str | None = None, *, with_timestamps: bool = True):
-    normalized = (name or default_model_name()).strip().lower()
-    normalized = MODEL_ALIASES.get(normalized, normalized)
-    if normalized not in MODEL_CONFIGS:
-        raise ValueError(f"unknown model {name!r}; choose one of {sorted(MODEL_CONFIGS)}")
-    key = (normalized, with_timestamps)
+def load_model(key: str, *, with_timestamps: bool = True):
+    """Load (or return the cached) model for a variant_key() key."""
+    cache_key = (key, with_timestamps)
 
     with _MODEL_LOCK:
-        cached = _MODELS.get(key)
+        cached = _MODELS.get(cache_key)
         if cached is not None:
-            _MODELS.move_to_end(key)
+            _MODELS.move_to_end(cache_key)
             return cached
 
-        config = MODEL_CONFIGS[normalized]
+        name, _, quant = key.partition(":")
+        config = MODEL_CONFIGS[name]
+        repo, file_quant = config["quantizations"][quant]
         providers = _resolve_providers()
         session_options = _build_sess_options()
         logger.info(
             "Loading %s (quant=%s) providers=%s intra=%d inter=%d",
-            config["hf_id"],
-            config["quantization"],
+            repo,
+            file_quant,
             providers,
             ORT_INTRA_THREADS,
             ORT_INTER_THREADS,
         )
         model = onnx_asr.load_model(
-            config["hf_id"],
-            quantization=config["quantization"],
+            repo,
+            quantization=file_quant,
             providers=providers,
             sess_options=session_options,
         )
@@ -209,20 +190,20 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
         # so keep Whisper on the plain text adapter (its .recognize() returns the
         # transcript string). Whisper word times would come from forced-aligning
         # that transcript against the audio, not from the model.
-        if with_timestamps and config.get("family", "parakeet") == "parakeet":
+        if with_timestamps and config["family"] == "parakeet":
             model = model.with_timestamps()
-        _validate_gpu_binding(normalized, model)
-        _MODELS[key] = model
+        _validate_gpu_binding(key, model)
+        _MODELS[cache_key] = model
         # ponytail: LRU cap, drop least-recent so a many-model sweep fits RAM.
         while MODEL_CACHE_SIZE and len(_MODELS) > MODEL_CACHE_SIZE:
             evicted, _ = _MODELS.popitem(last=False)
             logger.info("Evicted %s (cache size %d)", evicted, MODEL_CACHE_SIZE)
-        logger.info("Loaded %s", normalized)
+        logger.info("Loaded %s", key)
         return model
 
 
-def get_model(name: str | None = None):
-    return load_model(name, with_timestamps=True)
+def get_model(key: str):
+    return load_model(key, with_timestamps=True)
 
 
 def warmup_waveform(seconds: float | None = None) -> np.ndarray:
@@ -244,4 +225,4 @@ def warmup_waveform(seconds: float | None = None) -> np.ndarray:
 
 def loaded_models() -> List[str]:
     with _MODEL_LOCK:
-        return sorted({name for name, _timestamps in _MODELS})
+        return sorted({key for key, _timestamps in _MODELS})

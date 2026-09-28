@@ -10,6 +10,7 @@ services:
     container_name: parakeet-gpu
     environment:
       PARAKEET_USE_GPU: "true"
+      PARAKEET_PRELOAD_MODELS: "parakeet-v3"
       PARAKEET_BATCHED: "1"
       PARAKEET_MAX_BATCH_SIZE: "4"
       PARAKEET_BATCH_WINDOW_MS: "4"
@@ -44,6 +45,7 @@ services:
     profiles: ["cpu"]
     environment:
       PARAKEET_USE_GPU: "false"
+      PARAKEET_PRELOAD_MODELS: "parakeet-v3"
       PARAKEET_BATCHED: "0"
     ports:
       - "5092:5092"

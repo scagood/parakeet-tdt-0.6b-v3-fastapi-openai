@@ -12,4 +12,3 @@ numpy<3
 
 # CPU-only deployments replace onnxruntime-gpu with onnxruntime and run with:
 # PARAKEET_USE_GPU=false PARAKEET_BATCHED=0
-# (PARAKEET_USE_GPU=false already selects the CPU default, parakeet-v3-fp32)

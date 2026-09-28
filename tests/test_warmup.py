@@ -43,7 +43,7 @@ def test_warmup_waveform_is_never_empty():
 
 
 @pytest.mark.asyncio
-async def test_warmup_submits_the_default_model():
+async def test_warmup_submits_the_named_model():
     seen = {}
 
     async def submit(wav, model_name):
@@ -51,10 +51,10 @@ async def test_warmup_submits_the_default_model():
         seen["model"] = model_name
         return "ok"
 
-    await main._warmup(_app_with_worker(submit))
+    await main._warmup(_app_with_worker(submit), "parakeet-v3:fp32")
 
     assert seen["samples"] > 0
-    assert seen["model"]
+    assert seen["model"] == "parakeet-v3:fp32"
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_warmup_propagates_inference_errors():
         raise RuntimeError("model exploded")
 
     with pytest.raises(RuntimeError, match="warm-up inference failed") as info:
-        await main._warmup(_app_with_worker(submit))
+        await main._warmup(_app_with_worker(submit), "parakeet-v3:fp32")
 
     assert isinstance(info.value.__cause__, RuntimeError)
     assert "model exploded" in str(info.value.__cause__)
@@ -83,7 +83,7 @@ async def test_warmup_exits_the_process_on_a_stuck_worker(monkeypatch):
         await asyncio.sleep(60)
 
     with pytest.raises(RuntimeError, match="did not finish within"):
-        await main._warmup(_app_with_worker(submit))
+        await main._warmup(_app_with_worker(submit), "parakeet-v3:fp32")
 
     assert started.is_set()
     assert len(exits) == 1 and "PARAKEET_WARMUP_TIMEOUT_SEC" in exits[0]
@@ -111,6 +111,7 @@ async def test_lifespan_warms_up_before_reporting_ready(monkeypatch):
     stub = _StubModel()
     monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
     monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "PRELOAD_MODELS", ["parakeet-v3"])
 
     async with main.lifespan(app):
         assert app.state.ready is True
@@ -135,6 +136,7 @@ async def test_lifespan_reports_ready_when_warmup_is_disabled(monkeypatch):
     stub = _StubModel()
     monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
     monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "PRELOAD_MODELS", ["parakeet-v3"])
     monkeypatch.setattr(main, "WARMUP", False)
 
     async with main.lifespan(app):
@@ -160,12 +162,43 @@ async def test_lifespan_fails_startup_when_warmup_fails(monkeypatch):
     stub = _BrokenModel()
     monkeypatch.setattr(main, "load_model", lambda *a, **k: stub)
     monkeypatch.setattr(main, "get_model", lambda *a, **k: stub)
+    monkeypatch.setattr(main, "PRELOAD_MODELS", ["parakeet-v3"])
 
     with pytest.raises(RuntimeError, match="warm-up inference failed"):
         async with main.lifespan(app):
             pytest.fail("lifespan must not reach the serving phase")
 
     assert app.state.ready is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_with_nothing_preloaded_loads_nothing(monkeypatch):
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    monkeypatch.setattr(main, "load_model", lambda *a, **k: pytest.fail("nothing to load"))
+    monkeypatch.setattr(main, "PRELOAD_MODELS", [])
+
+    async with main.lifespan(app):
+        assert app.state.ready is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_preloads_each_entry_at_its_quantization(monkeypatch):
+    from fastapi import FastAPI
+
+    loaded = []
+    monkeypatch.setattr(main, "load_model", lambda key, **_k: loaded.append(key))
+    monkeypatch.setattr(main, "WARMUP", False)
+    monkeypatch.setattr(main, "PRELOAD_MODELS", ["parakeet-v3", "whisper-tiny:int8"])
+    async with main.lifespan(FastAPI()):
+        pass
+    assert loaded == ["parakeet-v3:fp32", "whisper-tiny:int8"]
+
+    monkeypatch.setattr(main, "PRELOAD_MODELS", ["parakeet-v3:q4"])
+    with pytest.raises(ValueError, match="no 'q4' quantization"):
+        async with main.lifespan(FastAPI()):
+            pytest.fail("an unknown quantization must fail startup")
 
 
 def test_warmup_input_matches_a_real_chunk():

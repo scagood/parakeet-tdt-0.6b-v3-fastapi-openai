@@ -47,6 +47,7 @@ docker run -d --name parakeet-gpu -p 5092:5092 --gpus all \
 |----------|---------|-------------|
 | `HF_HOME` | `/app/models` | HuggingFace model cache |
 | `HF_HUB_CACHE` | `/app/models` | HuggingFace hub cache |
+| `PARAKEET_PRELOAD_MODELS` | empty | Comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before `/healthz` reports ready, e.g. `parakeet-v3` or `parakeet-v3:fp16`. Requests must still name `model=`. |
 
 ### Persistent Model Cache
 
@@ -81,7 +82,7 @@ curl http://localhost:5092/health
 # Transcribe audio (OpenAI-compatible)
 curl -X POST http://localhost:5092/v1/audio/transcriptions \
     -F "file=@audio.mp3" \
-    -F "model=parakeet-v3-fp32"
+    -F "model=parakeet-v3"
 ```
 
 ## Troubleshooting

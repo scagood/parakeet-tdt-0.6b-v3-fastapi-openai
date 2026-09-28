@@ -124,7 +124,8 @@ async def _transcribe(
         response = await routes.transcribe(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
-            model=None,
+            model="parakeet-v3",
+            quantization=None,
             response_format=response_format,
             timestamp_granularities=[granularity] if granularity else None,
             timestamp_granularities_plain=None,
@@ -146,7 +147,8 @@ async def _batch(*texts, spoken_numbers=None):
         body = await routes.transcribe_batch(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             files=[UploadFile(io.BytesIO(text.encode()), filename=f"{i}.wav") for i, text in enumerate(texts)],
-            model=None,
+            model="parakeet-v3",
+            quantization=None,
             spoken_numbers=spoken_numbers,
         )
     finally:
@@ -375,6 +377,7 @@ async def _transcribe_whisper(model, *, language=None, align_words=True, text="h
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
             model=model,
+            quantization=None,
             response_format="verbose_json",
             timestamp_granularities=["word"],
             timestamp_granularities_plain=None,

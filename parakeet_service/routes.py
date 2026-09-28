@@ -24,14 +24,13 @@ from .config import (
     MAX_BATCH_FILES,
     MAX_REQUEST_CHUNKS,
     MAX_UPLOAD_BYTES,
-    MODEL_ALIASES,
     MODEL_CONFIGS,
     SPOKEN_NUMBERS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
     logger,
 )
-from .model import default_model_name, loaded_models
+from .model import loaded_models, variant_key
 
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
@@ -130,9 +129,8 @@ def _extract(result: Any) -> Dict[str, Any]:
     return {"text": text, "tokens": tokens, "timestamps": timestamps}
 
 
-def _validate_model(model: Optional[str]) -> str:
-    normalized = (model or default_model_name()).strip().lower()
-    normalized = MODEL_ALIASES.get(normalized, normalized)
+def _validate_model(model: str) -> str:
+    normalized = model.strip().lower()
     if normalized not in MODEL_CONFIGS:
         raise HTTPException(
             status_code=400,
@@ -141,8 +139,16 @@ def _validate_model(model: Optional[str]) -> str:
     return normalized
 
 
+def _variant(model_name: str, quantization: Optional[str]) -> str:
+    """The "model:quant" key a request runs on; fp32 unless it asks otherwise."""
+    try:
+        return variant_key(model_name, quantization)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 def _family(model_name: str) -> str:
-    return MODEL_CONFIGS[model_name].get("family", "parakeet")
+    return MODEL_CONFIGS[model_name]["family"]
 
 
 def _chunk_bounds(model_name: str) -> Tuple[float, float, float]:
@@ -570,52 +576,27 @@ async def _stitch_request(
     return await loop.run_in_executor(state.align_pool if needs else state.audio_pool, stitch)
 
 
-async def _infer_prepared(request: Request, prepared: _PreparedAudio, model_name: str):
+async def _infer_prepared(request: Request, prepared: _PreparedAudio, model_key: str):
     worker = request.app.state.worker
     if worker is None or not getattr(request.app.state, "ready", False):
         raise HTTPException(status_code=503, detail="Model is not ready")
-    return await worker.submit_many(prepared.pieces, model_name)
+    return await worker.submit_many(prepared.pieces, model_key)
 
 
-# parakeet-tdt-0.6b-v3 language coverage; v2 is English-only.
-_V3_LANGUAGES = [
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
-    "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
-    "uk",
-]
-# Whisper's 99 languages (multilingual exports); the .en exports are English-only.
-_WHISPER_LANGUAGES = [
-    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca",
-    "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
-    "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la",
-    "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
-    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
-    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be",
-    "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn",
-    "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha",
-    "ba", "jw", "su",
-]
 _MODEL_CREATED = 1785888000  # catalog introduction (2026-08-05), fixed for stable output
 
 
 def _model_card(name: str) -> Dict[str, Any]:
-    hf_id = MODEL_CONFIGS[name]["hf_id"]
-    if _family(name) == "whisper":
-        owned_by = "openai"
-        # .en exports are English-only; the rest are Whisper's full 99-language
-        # set. Key off the repo id, since the model name may carry a quant suffix.
-        language = ["en"] if hf_id.endswith(".en") else _WHISPER_LANGUAGES
-    else:
-        owned_by = hf_id.split("/")[0] if "/" in hf_id else "istupakov"
-        language = ["en"] if name.startswith("parakeet-v2") else _V3_LANGUAGES
+    config = MODEL_CONFIGS[name]
     return {
         "id": name,
         "object": "model",
         "created": _MODEL_CREATED,
-        "owned_by": owned_by,
-        "language": language,
+        # The model's author; each quantization is someone's ONNX export of it.
+        "owned_by": "openai" if _family(name) == "whisper" else "nvidia",
+        "language": config["languages"],
+        "quantizations": list(config["quantizations"]),
         "task": "automatic-speech-recognition",
-        "aliases": sorted(a for a, t in MODEL_ALIASES.items() if t == name),
     }
 
 
@@ -643,7 +624,6 @@ def health(request: Request):
         "ready": ready,
         "models": list(MODEL_CONFIGS.keys()),
         "loaded": loaded_models(),
-        "default_model": default_model_name(),
         "cpu": CPU_INFO,
         "aligner": aligner.status(),
     }
@@ -659,10 +639,10 @@ def healthz(request: Request):
 def _whisper_english(model_name: str, language: Optional[str]) -> bool:
     """Whether a Whisper request may use the (English-only) aligner for word
     times. Whisper has no native word timing, so we require English to be
-    *known* — an English-only .en model, or an explicit English `language` —
+    *known* — an English-only model, or an explicit English `language` —
     never inferred from a multilingual model's auto-detection, which could be
     any language and would mis-time the audio."""
-    if MODEL_CONFIGS[model_name]["hf_id"].endswith(".en"):
+    if MODEL_CONFIGS[model_name]["languages"] == ["en"]:
         return True
     lang = (language or "").strip()
     return bool(lang) and aligner.language_code(lang) == "en"
@@ -679,7 +659,8 @@ def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
 async def transcribe(
     request: Request,
     file: UploadFile = File(...),
-    model: Optional[str] = Form(None),
+    model: str = Form(...),
+    quantization: Optional[str] = Form(None),
     response_format: str = Form("json"),
     timestamp_granularities: Optional[List[str]] = Form(
         None, alias="timestamp_granularities[]"
@@ -695,6 +676,7 @@ async def transcribe(
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
+    model_key = _variant(model_name, quantization)
     family = _family(model_name)
     target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     output_format = _validate_format(response_format)
@@ -718,7 +700,7 @@ async def transcribe(
     decode_ms = (time.perf_counter() - started) * 1000
 
     infer_started = time.perf_counter()
-    results = await _infer_prepared(request, prepared, model_name)
+    results = await _infer_prepared(request, prepared, model_key)
     infer_ms = (time.perf_counter() - infer_started) * 1000
 
     stitch_started = time.perf_counter()
@@ -735,7 +717,7 @@ async def transcribe(
     logger.info(
         "transcribe model=%s dur=%.2fs chunks=%d decode=%.0fms infer=%.0fms "
         "stitch=%.0fms total=%.0fms",
-        model_name,
+        model_key,
         prepared.duration,
         len(prepared.pieces),
         decode_ms,
@@ -782,7 +764,8 @@ async def transcribe(
 async def transcribe_batch(
     request: Request,
     files: List[UploadFile] = File(...),
-    model: Optional[str] = Form(None),
+    model: str = Form(...),
+    quantization: Optional[str] = Form(None),
     spoken_numbers: Optional[bool] = Form(None),
 ):
     if not files:
@@ -793,6 +776,7 @@ async def transcribe_batch(
             detail=f"Batch contains {len(files)} files; limit is {MAX_BATCH_FILES}",
         )
     model_name = _validate_model(model)
+    model_key = _variant(model_name, quantization)
     target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     filenames = [upload.filename or "unnamed" for upload in files]
 
@@ -847,7 +831,7 @@ async def transcribe_batch(
     worker = request.app.state.worker
     if worker is None or not getattr(request.app.state, "ready", False):
         raise HTTPException(status_code=503, detail="Model is not ready")
-    flat_results = await worker.submit_many(flattened, model_name)
+    flat_results = await worker.submit_many(flattened, model_key)
 
     # The batch endpoint takes no `language`: the default decides.
     speak = _speaks(spoken_numbers, None)

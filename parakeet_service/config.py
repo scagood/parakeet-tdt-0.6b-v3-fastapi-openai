@@ -96,51 +96,177 @@ if HF_OFFLINE:
     # base image that exports HF_HUB_OFFLINE=0.
     os.environ["HF_HUB_OFFLINE"] = "1"
 
+# parakeet-tdt-0.6b-v3 language coverage; v2 is English-only.
+_V3_LANGUAGES = [
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
+    "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
+    "uk",
+]
+# Whisper's 99 languages (multilingual exports); the .en exports are English-only.
+_WHISPER_LANGUAGES = [
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca",
+    "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
+    "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la",
+    "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be",
+    "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn",
+    "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha",
+    "ba", "jw", "su",
+]
+
+# One entry per model: what every precision of it shares (family, languages,
+# chunk lengths) and, per quantization, the repo and onnx_asr quantization to
+# load (https://github.com/istupakov/onnx-asr). A request names the model and
+# may pick a quantization; without one it gets fp32, the reference precision,
+# whatever the hardware. FP16 halves VRAM (identical output measured on
+# Parakeet v3) but ONNX Runtime upcasts it on CPU, which is slower; int8
+# measurably drops words after silences.
+#
+# Whisper repos are onnx-community's except where its export is broken (#35):
+# the bare medium and large-v3 repos are empty (the exports live under -ONNX),
+# there is no medium.en, and the .en fp16 merged decoders fail onnxruntime's
+# graph check. Those come from Xenova, whose 8-bit files are _quantized (it has
+# no int8 encoder). The Whisper encoder sees a fixed 30 s window and the export
+# silently drops audio past it, so a longer chunk would lose its tail. Whisper
+# returns text only; word times come from forced alignment of the transcript
+# (#26).
 MODEL_CONFIGS = {
-    "parakeet-v3-int8": {
-        "hf_id": "nemo-parakeet-tdt-0.6b-v3",
-        "quantization": "int8",
-        "description": "INT8 CPU profile",
+    "parakeet-v3": {
+        "family": "parakeet",
+        "languages": _V3_LANGUAGES,
         "chunk_target_sec": 60.0,
         "chunk_max_sec": 75.0,
+        "quantizations": {
+            "fp32": ("istupakov/parakeet-tdt-0.6b-v3-onnx", None),
+            "fp16": ("grikdotnet/parakeet-tdt-0.6b-fp16", "fp16"),
+            "int8": ("istupakov/parakeet-tdt-0.6b-v3-onnx", "int8"),
+        },
     },
-    "parakeet-v3-fp32": {
-        "hf_id": "istupakov/parakeet-tdt-0.6b-v3-onnx",
-        "quantization": None,
-        "description": "FP32 GPU profile",
-        "chunk_target_sec": 60.0,
-        "chunk_max_sec": 75.0,
-    },
-    "parakeet-v3-fp16": {
-        "hf_id": "grikdotnet/parakeet-tdt-0.6b-fp16",
-        "quantization": "fp16",
-        "description": "FP16 GPU profile",
-        "chunk_target_sec": 60.0,
-        "chunk_max_sec": 75.0,
-    },
-    "parakeet-v2-int8": {
-        "hf_id": "nemo-parakeet-tdt-0.6b-v2",
-        "quantization": "int8",
-        "description": "INT8 CPU profile (English-only v2)",
+    "parakeet-v2": {
+        "family": "parakeet",
+        "languages": ["en"],
         "chunk_target_sec": 25.0,
         "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("istupakov/parakeet-tdt-0.6b-v2-onnx", None),
+            "fp16": ("ysdede/parakeet-tdt-0.6b-v2-onnx", "fp16"),
+            "int8": ("istupakov/parakeet-tdt-0.6b-v2-onnx", "int8"),
+        },
     },
-    "parakeet-v2-fp32": {
-        "hf_id": "istupakov/parakeet-tdt-0.6b-v2-onnx",
-        "quantization": None,
-        "description": "FP32 profile (English-only v2)",
+    "whisper-tiny": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
         "chunk_target_sec": 25.0,
         "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-tiny", None),
+            "fp16": ("onnx-community/whisper-tiny", "fp16"),
+            "int8": ("onnx-community/whisper-tiny", "int8"),
+        },
     },
-    "parakeet-v2-fp16": {
-        "hf_id": "ysdede/parakeet-tdt-0.6b-v2-onnx",
-        "quantization": "fp16",
-        "description": "FP16 GPU profile (English-only v2)",
+    "whisper-tiny.en": {
+        "family": "whisper",
+        "languages": ["en"],
         "chunk_target_sec": 25.0,
         "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-tiny.en", None),
+            "fp16": ("Xenova/whisper-tiny.en", "fp16"),
+            "int8": ("onnx-community/whisper-tiny.en", "int8"),
+        },
+    },
+    "whisper-base": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-base", None),
+            "fp16": ("onnx-community/whisper-base", "fp16"),
+            "int8": ("onnx-community/whisper-base", "int8"),
+        },
+    },
+    "whisper-base.en": {
+        "family": "whisper",
+        "languages": ["en"],
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-base.en", None),
+            "fp16": ("Xenova/whisper-base.en", "fp16"),
+            "int8": ("onnx-community/whisper-base.en", "int8"),
+        },
+    },
+    "whisper-small": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-small", None),
+            "fp16": ("onnx-community/whisper-small", "fp16"),
+            "int8": ("onnx-community/whisper-small", "int8"),
+        },
+    },
+    "whisper-small.en": {
+        "family": "whisper",
+        "languages": ["en"],
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-small.en", None),
+            "fp16": ("Xenova/whisper-small.en", "fp16"),
+            "int8": ("onnx-community/whisper-small.en", "int8"),
+        },
+    },
+    "whisper-medium": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-medium-ONNX", None),
+            "fp16": ("onnx-community/whisper-medium-ONNX", "fp16"),
+            "int8": ("onnx-community/whisper-medium-ONNX", "int8"),
+        },
+    },
+    "whisper-medium.en": {
+        "family": "whisper",
+        "languages": ["en"],
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("Xenova/whisper-medium.en", None),
+            "fp16": ("Xenova/whisper-medium.en", "fp16"),
+            "int8": ("Xenova/whisper-medium.en", "quantized"),
+        },
+    },
+    "whisper-large-v3": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-large-v3-ONNX", None),
+            "fp16": ("onnx-community/whisper-large-v3-ONNX", "fp16"),
+            "int8": ("onnx-community/whisper-large-v3-ONNX", "int8"),
+        },
+    },
+    "whisper-large-v3-turbo": {
+        "family": "whisper",
+        "languages": _WHISPER_LANGUAGES,
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
+        "quantizations": {
+            "fp32": ("onnx-community/whisper-large-v3-turbo", None),
+            "fp16": ("onnx-community/whisper-large-v3-turbo", "fp16"),
+            "int8": ("onnx-community/whisper-large-v3-turbo", "int8"),
+        },
     },
 }
-# Entries without an explicit "family" are Parakeet TDT; read via config.get.
+# Every entry lists the languages it transcribes: served on its model card, and
+# ["en"] marks an English-only model whose word times the aligner may take.
 # Every entry states the chunk length long audio is cut to: "chunk_target_sec"
 # preferred, "chunk_max_sec" at most (and audio no longer than that is not cut
 # at all). Parakeet v2, fp32 and int8 alike, hears whole stretches of clear
@@ -149,66 +275,16 @@ MODEL_CONFIGS = {
 # Parakeet v3 is the other way round: it loses more speech in 20-30 s chunks
 # than in 60 s ones.
 
-# Whisper (sketch): onnx_asr loads every onnx-community/whisper-* export, which
-# ships fp32 + fp16 + int8 (plus q4/uint8/bnb4) for each size. The catalog is
-# generated rather than spelled out — repo id, quant and family are formulaic.
-# Naming mirrors the parakeet split: bare name = fp32 default, -fp16 for GPU,
-# -int8 for CPU. English-only sizes carry the .en suffix in the size itself.
-# Verified on onnx_asr 0.12.0 (whisper-tiny, CPU): fp32/fp16/int8 all load and
-# transcribe, and batched .recognize([...]) returns a list (the GPU batch path
-# is safe). The standard repos return text only — no token timestamps — so the
-# whisper handling in model.py/routes.py yields text + 30 s-chunked coarse
-# segment times, no word timestamps. That is a correct result, not a stub; word
-# timestamps would come from forced alignment of the transcript (see #26).
-_WHISPER_SIZES = (
-    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
-    "medium", "medium.en", "large-v3", "large-v3-turbo",
-)
-_WHISPER_QUANTS = {"": None, "-fp16": "fp16", "-int8": "int8"}
-MODEL_CONFIGS.update(
-    {
-        f"whisper-{size}{suffix}": {
-            "hf_id": f"onnx-community/whisper-{size}",
-            "quantization": quant,
-            "description": f"Whisper {size} (onnx-community, {quant or 'fp32'})",
-            "family": "whisper",
-            # The encoder sees a fixed 30 s window and the ONNX export silently
-            # drops audio past it, so a longer chunk would lose its tail.
-            "chunk_target_sec": 25.0,
-            "chunk_max_sec": 30.0,
-        }
-        for size in _WHISPER_SIZES
-        for suffix, quant in _WHISPER_QUANTS.items()
-    }
-)
-# Former API names, kept working. Keys are lowercase; lookups are normalized.
-MODEL_ALIASES = {
-    "parakeet-v3": "parakeet-v3-fp32",
-    "parakeet-tdt-0.6b-v3": "parakeet-v3-int8",
-    "istupakov/parakeet-tdt-0.6b-v3-onnx": "parakeet-v3-fp32",
-    "grikdotnet/parakeet-tdt-0.6b-fp16": "parakeet-v3-fp16",
-    "parakeet-v2": "parakeet-v2-fp32",
-    "parakeet-tdt-0.6b-v2": "parakeet-v2-int8",
-    "istupakov/parakeet-tdt-0.6b-v2-onnx": "parakeet-v2-fp32",
-    # Version-less shortcuts for the sizes people name without the -v3 suffix.
-    "whisper-large": "whisper-large-v3",
-    "whisper-turbo": "whisper-large-v3-turbo",
-}
-# FP16 halves VRAM at identical output on GPU; on CPU it upcasts (slower), so
-# CPU deployments default to FP32. int8 measurably drops words after silences.
-GPU_DEFAULT_MODEL = "parakeet-v3-fp16"
-CPU_DEFAULT_MODEL = "parakeet-v3-fp32"
-
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
-_default_model_fallback = CPU_DEFAULT_MODEL if USE_GPU == "false" else GPU_DEFAULT_MODEL
-DEFAULT_MODEL_EXPLICIT = os.getenv("PARAKEET_DEFAULT_MODEL") is not None
-DEFAULT_MODEL = os.getenv("PARAKEET_DEFAULT_MODEL", _default_model_fallback).strip().lower()
-DEFAULT_MODEL = MODEL_ALIASES.get(DEFAULT_MODEL, DEFAULT_MODEL)
-if DEFAULT_MODEL not in MODEL_CONFIGS:
-    raise RuntimeError(
-        "PARAKEET_DEFAULT_MODEL must be one of "
-        f"{sorted(MODEL_CONFIGS)}, got {DEFAULT_MODEL!r}"
-    )
+
+# Models loaded (and warmed up) before the service reports ready, as "model"
+# (fp32) or "model:quantization". Requests must still name their model; nothing
+# here is used as a fallback. Entries are validated at startup, like requests.
+PRELOAD_MODELS = [
+    entry.strip().lower()
+    for entry in os.getenv("PARAKEET_PRELOAD_MODELS", "").split(",")
+    if entry.strip()
+]
 
 
 # ---------------------------------------------------------------------------

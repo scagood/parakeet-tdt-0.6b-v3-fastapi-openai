@@ -59,7 +59,8 @@ ENV PARAKEET_AUDIO_WORKERS=8
 EXPOSE 5092
 
 # start-period covers model load plus the warm-up timeout (120s default):
-# the server only answers /healthz once the warm-up chunk has run.
+# the server only answers /healthz once each PARAKEET_PRELOAD_MODELS entry
+# has loaded and run its warm-up chunk.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=240s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5092/healthz')" || exit 1
 
