@@ -25,7 +25,6 @@ from .config import (
 import numpy as np
 import onnx_asr
 import onnxruntime as ort
-from huggingface_hub import hf_hub_download
 
 _ModelKey = Tuple[str, bool]
 _MODELS: "OrderedDict[_ModelKey, object]" = OrderedDict()
@@ -166,6 +165,8 @@ def _link_files(variant: Dict[str, Any], folder: Path) -> None:
     Hard links, not symlinks: onnxruntime resolves a symlinked .onnx to its
     cache blob and refuses external data that resolves anywhere else (#35).
     """
+    from huggingface_hub import hf_hub_download
+
     for name, path in variant["files"].items():
         blob = os.path.realpath(
             hf_hub_download(variant["repo"], path, revision=variant["revision"])

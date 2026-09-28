@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 from collections import OrderedDict
 
 from parakeet_service import model as m
@@ -27,7 +29,7 @@ def _stub_loader(monkeypatch, tmp_path, cache_size, calls=None):
             calls.append((model_type, files))
         return object()
 
-    monkeypatch.setattr(m, "hf_hub_download", download)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=download))
     monkeypatch.setattr(m.onnx_asr, "load_model", load, raising=False)
 
 
