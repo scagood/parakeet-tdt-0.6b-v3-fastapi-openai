@@ -105,10 +105,24 @@ if HF_OFFLINE:
 # replaces the built-in catalog wholesale. Either way it is validated here, so a
 # broken catalog stops the service at startup rather than at a request.
 
-# What onnx-asr reads from a model folder, by the model type that runs it.
-ONNX_ASR_FILES = {
-    "nemo-conformer-tdt": {"encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt", "config.json"},
-    "whisper": {"encoder_model.onnx", "decoder_model_merged.onnx", "vocab.json", "added_tokens.json", "config.json"},
+# What onnx-asr reads from a model folder, by the model type that runs it, and
+# where each file sits in the repo unless an entry's "files" says otherwise: the
+# fp32 layout of that type's usual exports (istupakov's for Parakeet,
+# onnx-community's for Whisper). Other precisions name their own files.
+ONNX_ASR_DEFAULT_FILES = {
+    "nemo-conformer-tdt": {
+        "encoder-model.onnx": "encoder-model.onnx",
+        "decoder_joint-model.onnx": "decoder_joint-model.onnx",
+        "vocab.txt": "vocab.txt",
+        "config.json": "config.json",
+    },
+    "whisper": {
+        "encoder_model.onnx": "onnx/encoder_model.onnx",
+        "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
+        "vocab.json": "vocab.json",
+        "added_tokens.json": "added_tokens.json",
+        "config.json": "config.json",
+    },
 }
 # How routes.py treats a model's output: Parakeet's TDT tokens carry word times,
 # Whisper returns text only.
@@ -131,11 +145,12 @@ def validate_catalog(models: Dict[str, Any]) -> None:
             raise ValueError(f"{name}: missing {sorted(missing)}")
         if not isinstance(entry["family"], str) or entry["family"] not in MODEL_FAMILIES:
             raise ValueError(f"{name}: family {entry['family']!r} is not one of {sorted(MODEL_FAMILIES)}")
-        required = ONNX_ASR_FILES.get(entry["onnx_asr_type"]) if isinstance(entry["onnx_asr_type"], str) else None
-        if required is None:
+        onnx_asr_type = entry["onnx_asr_type"]
+        if not isinstance(onnx_asr_type, str) or onnx_asr_type not in ONNX_ASR_DEFAULT_FILES:
             raise ValueError(
-                f"{name}: onnx_asr_type {entry['onnx_asr_type']!r} is not one of {sorted(ONNX_ASR_FILES)}"
+                f"{name}: onnx_asr_type {onnx_asr_type!r} is not one of {sorted(ONNX_ASR_DEFAULT_FILES)}"
             )
+        defaults = ONNX_ASR_DEFAULT_FILES[onnx_asr_type]
         languages = entry["languages"]
         if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
             # A bare `no` (Norwegian) arrives as False: quote language codes.
@@ -146,7 +161,8 @@ def validate_catalog(models: Dict[str, Any]) -> None:
         quantizations = entry["quantizations"]
         if not isinstance(quantizations, dict) or "fp32" not in quantizations:
             raise ValueError(f"{name}: quantizations must include fp32, the default")
-        graphs = [f for f in required if f.endswith(".onnx")]
+        graphs = [f for f in defaults if f.endswith(".onnx")]
+        loads: Dict[tuple, str] = {}
         for quant, variant in quantizations.items():
             where = f"{name}:{quant}"
             if not isinstance(quant, str) or quant != quant.lower():
@@ -156,16 +172,19 @@ def validate_catalog(models: Dict[str, Any]) -> None:
             # Quote it: an unquoted SHA can load as a number.
             if not isinstance(variant.get("revision"), str) or not _REVISION.fullmatch(variant["revision"]):
                 raise ValueError(f"{where}: revision must be a quoted 40-character commit SHA")
-            files = variant.get("files")
+            files = variant.get("files", {})
             if not isinstance(files, dict) or not all(isinstance(x, str) for x in (*files, *files.values())):
                 raise ValueError(f"{where}: files must map onnx-asr names to repo paths")
-            if missing := required - files.keys():
-                raise ValueError(f"{where}: files is missing {sorted(missing)}")
-            for extra in files.keys() - required:
+            for extra in files.keys() - defaults.keys():
                 # Anything else is external data (possibly sharded, .data.000),
                 # named as its .onnx refers to it.
                 if not (any(extra.startswith(g) for g in graphs) and "data" in extra):
                     raise ValueError(f"{where}: {extra!r} is neither a file onnx-asr reads nor external data")
+            # A quantization that forgot its `files` would quietly load another's.
+            key = (variant["repo"], variant["revision"], tuple(sorted({**defaults, **files}.items())))
+            if key in loads:
+                raise ValueError(f"{where}: loads the same files as {name}:{loads[key]}; name its own in `files`")
+            loads[key] = quant
 
 
 def load_catalog(path: Path) -> Dict[str, Any]:
@@ -178,7 +197,12 @@ def load_catalog(path: Path) -> Dict[str, Any]:
         validate_catalog(catalog.get("models"))
     except ValueError as exc:
         raise RuntimeError(f"invalid model catalog {path}: {exc}") from None
-    return catalog["models"]
+    models = catalog["models"]
+    # Spell out every file here, so loading never has to know about defaults.
+    for entry in models.values():
+        for variant in entry["quantizations"].values():
+            variant["files"] = {**ONNX_ASR_DEFAULT_FILES[entry["onnx_asr_type"]], **variant.get("files", {})}
+    return models
 
 
 CATALOG_PATH = Path(os.getenv("PARAKEET_MODEL_CATALOG") or Path(__file__).with_name("models.yaml"))

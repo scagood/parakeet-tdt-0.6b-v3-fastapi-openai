@@ -271,7 +271,8 @@ transcript = client.audio.transcriptions.create(
 
 The models above are defined in [`parakeet_service/models.yaml`](parakeet_service/models.yaml):
 per model its family, languages and chunk lengths, and per quantization a
-Hugging Face repo, a pinned commit and the exact files to load. To serve a
+Hugging Face repo, a pinned commit and, where they differ from the fp32
+defaults, the files to load. To serve a
 different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
 another file of the same shape. It **replaces** the built-in catalog, so copy
 the built-in file and edit it. The file is checked at startup and the service

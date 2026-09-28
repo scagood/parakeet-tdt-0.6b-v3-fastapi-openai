@@ -16,14 +16,16 @@ _ENTRY = {
         "fp32": {
             "repo": "me/model",
             "revision": "0" * 40,
+            "files": {"encoder-model.onnx.data.000": "encoder-model.onnx.data.000"},
+        },
+        "int8": {
+            "repo": "me/model",
+            "revision": "0" * 40,
             "files": {
-                "encoder-model.onnx": "encoder-model.onnx",
-                "encoder-model.onnx.data.000": "encoder-model.onnx.data.000",
-                "decoder_joint-model.onnx": "decoder_joint-model.onnx",
-                "vocab.txt": "vocab.txt",
-                "config.json": "config.json",
+                "encoder-model.onnx": "int8/encoder-model.int8.onnx",
+                "decoder_joint-model.onnx": "int8/decoder_joint-model.int8.onnx",
             },
-        }
+        },
     },
 }
 
@@ -36,13 +38,22 @@ def test_a_replacement_file_loads_with_anchors_and_quoted_codes(tmp_path):
         "    family: parakeet\n    onnx_asr_type: nemo-conformer-tdt\n    languages: *nordic\n"
         "    chunk_target_sec: 25\n    chunk_max_sec: 30\n"
         '    quantizations:\n      fp32:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
-        "        files:\n          encoder-model.onnx: encoder-model.onnx\n"
-        "          decoder_joint-model.onnx: decoder_joint-model.onnx\n"
-        "          vocab.txt: vocab.txt\n          config.json: config.json\n"
+        '      fp16:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
+        "        files:\n          encoder-model.onnx: encoder-model.fp16.onnx\n"
     )
     models = load_catalog(path)
     assert list(models) == ["my-model"]
     assert models["my-model"]["languages"] == ["da", "no", "sv"]
+    # Defaults are spelled out on load; `files` overrides only what it names.
+    quantizations = models["my-model"]["quantizations"]
+    assert quantizations["fp32"]["files"] == {
+        "encoder-model.onnx": "encoder-model.onnx",
+        "decoder_joint-model.onnx": "decoder_joint-model.onnx",
+        "vocab.txt": "vocab.txt",
+        "config.json": "config.json",
+    }
+    assert quantizations["fp16"]["files"]["encoder-model.onnx"] == "encoder-model.fp16.onnx"
+    assert quantizations["fp16"]["files"]["decoder_joint-model.onnx"] == "decoder_joint-model.onnx"
 
 
 def _broken(change):
@@ -56,7 +67,8 @@ def _broken(change):
     [
         (lambda e, v: e["quantizations"].pop("fp32"), "fp32"),
         (lambda e, v: v.update(revision=1234), "revision"),
-        (lambda e, v: v["files"].pop("vocab.txt"), "missing ['vocab.txt']"),
+        (lambda e, v: e["quantizations"]["int8"].update(files=dict(v["files"])), "same files as my-model:fp32"),
+        (lambda e, v: v.update(files=["encoder-model.onnx"]), "files must map"),
         (lambda e, v: v["files"].update({"notes.txt": "notes.txt"}), "neither"),
         (lambda e, v: e.update(onnx_asr_type="whisper-ort"), "onnx_asr_type"),
         (lambda e, v: e.update(family=["parakeet"]), "family"),
