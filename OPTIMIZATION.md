@@ -189,6 +189,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
 | `PARAKEET_VAD_MIN_SILENCE_MS` | `400`     | min silence between chunks                               |
 | `PARAKEET_VAD_SPEECH_PAD_MS` | `120`      | pad around speech segments                               |
+| `PARAKEET_MODEL_CACHE_SIZE` | `0`        | max loaded models kept; least-recent evicted, `0` = unbounded |
 | `PARAKEET_MAX_BATCH_SIZE`  | `4`          | max batch (only used when `PARAKEET_BATCHED=1`)          |
 | `PARAKEET_BATCH_WINDOW_MS` | `4`          | batch collection window                                  |
 | `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |

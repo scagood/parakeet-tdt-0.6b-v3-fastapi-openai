@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
 # Import config before ONNX Runtime so thread-pool environment limits are active.
@@ -12,6 +13,7 @@ from .config import (
     GPU_DEFAULT_MODEL,
     GPU_DEVICE_ID,
     MODEL_ALIASES,
+    MODEL_CACHE_SIZE,
     MODEL_CONFIGS,
     ORT_INTER_THREADS,
     ORT_INTRA_THREADS,
@@ -26,7 +28,7 @@ import onnx_asr
 import onnxruntime as ort
 
 _ModelKey = Tuple[str, bool]
-_MODELS: Dict[_ModelKey, object] = {}
+_MODELS: "OrderedDict[_ModelKey, object]" = OrderedDict()
 _MODEL_LOCK = threading.RLock()
 _CUDA_PRELOADED = False
 
@@ -180,6 +182,7 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
     with _MODEL_LOCK:
         cached = _MODELS.get(key)
         if cached is not None:
+            _MODELS.move_to_end(key)
             return cached
 
         config = MODEL_CONFIGS[normalized]
@@ -210,6 +213,10 @@ def load_model(name: str | None = None, *, with_timestamps: bool = True):
             model = model.with_timestamps()
         _validate_gpu_binding(normalized, model)
         _MODELS[key] = model
+        # ponytail: LRU cap, drop least-recent so a many-model sweep fits RAM.
+        while MODEL_CACHE_SIZE and len(_MODELS) > MODEL_CACHE_SIZE:
+            evicted, _ = _MODELS.popitem(last=False)
+            logger.info("Evicted %s (cache size %d)", evicted, MODEL_CACHE_SIZE)
         logger.info("Loaded %s", normalized)
         return model
 
