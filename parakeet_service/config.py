@@ -78,6 +78,11 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_CACHE", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "true")
+# huggingface_hub 2.x files Xet blobs in a cache-wide store sharded by hash
+# prefix, so a model .onnx and its external-data file resolve into different
+# directories and onnxruntime 1.30 refuses the data as escaping the model
+# directory (#35). Per-repo blobs keep each pair side by side.
+os.environ.setdefault("HF_HUB_DISABLE_SHARED_BLOBS", "1")
 
 # Even with a fully warm cache, huggingface_hub makes a revision-check request
 # to huggingface.co on every load. Offline mode skips it and reads the cache
