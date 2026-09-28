@@ -5,9 +5,7 @@ import threading
 from typing import List, Tuple
 
 from .config import (
-    CHUNK_MAX_SEC,
     CHUNK_MIN_SEC,
-    CHUNK_TARGET_SEC,
     CHUNK_TRIM_SILENCE_SEC,
     TARGET_SR,
     VAD_MIN_SILENCE_MS,
@@ -140,8 +138,8 @@ def _split_oversized(start: int, end: int, target: int, maximum: int) -> List[Ra
 def auto_chunk(
     wav: np.ndarray,
     *,
-    target_sec: float = CHUNK_TARGET_SEC,
-    max_sec: float = CHUNK_MAX_SEC,
+    target_sec: float,
+    max_sec: float,
     min_sec: float = CHUNK_MIN_SEC,
 ) -> List[Range]:
     """Return ordered, non-empty, bounded ranges in the original waveform.
@@ -149,8 +147,7 @@ def auto_chunk(
     Short clips bypass VAD. Long clips with no detected speech return no ranges,
     allowing the API to skip expensive ASR inference for silence.
 
-    Bounds default to the Parakeet config globals; callers override them for
-    models with a shorter receptive field (Whisper's fixed 30 s window).
+    Bounds are the model's own (config.MODEL_CONFIGS).
     """
     total = int(wav.size)
     if total <= 0:

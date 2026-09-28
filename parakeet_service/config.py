@@ -96,34 +96,53 @@ MODEL_CONFIGS = {
         "hf_id": "nemo-parakeet-tdt-0.6b-v3",
         "quantization": "int8",
         "description": "INT8 CPU profile",
+        "chunk_target_sec": 60.0,
+        "chunk_max_sec": 75.0,
     },
     "parakeet-v3-fp32": {
         "hf_id": "istupakov/parakeet-tdt-0.6b-v3-onnx",
         "quantization": None,
         "description": "FP32 GPU profile",
+        "chunk_target_sec": 60.0,
+        "chunk_max_sec": 75.0,
     },
     "parakeet-v3-fp16": {
         "hf_id": "grikdotnet/parakeet-tdt-0.6b-fp16",
         "quantization": "fp16",
         "description": "FP16 GPU profile",
+        "chunk_target_sec": 60.0,
+        "chunk_max_sec": 75.0,
     },
     "parakeet-v2-int8": {
         "hf_id": "nemo-parakeet-tdt-0.6b-v2",
         "quantization": "int8",
         "description": "INT8 CPU profile (English-only v2)",
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
     },
     "parakeet-v2-fp32": {
         "hf_id": "istupakov/parakeet-tdt-0.6b-v2-onnx",
         "quantization": None,
         "description": "FP32 profile (English-only v2)",
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
     },
     "parakeet-v2-fp16": {
         "hf_id": "ysdede/parakeet-tdt-0.6b-v2-onnx",
         "quantization": "fp16",
         "description": "FP16 GPU profile (English-only v2)",
+        "chunk_target_sec": 25.0,
+        "chunk_max_sec": 30.0,
     },
 }
 # Entries without an explicit "family" are Parakeet TDT; read via config.get.
+# Every entry states the chunk length long audio is cut to: "chunk_target_sec"
+# preferred, "chunk_max_sec" at most (and audio no longer than that is not cut
+# at all). Parakeet v2, fp32 and int8 alike, hears whole stretches of clear
+# speech in a chunk of 45 s or more as silence, which ones depending
+# chaotically on where the chunk starts; no 20 or 30 s chunk did (#36).
+# Parakeet v3 is the other way round: it loses more speech in 20-30 s chunks
+# than in 60 s ones.
 
 # Whisper (sketch): onnx_asr loads every onnx-community/whisper-* export, which
 # ships fp32 + fp16 + int8 (plus q4/uint8/bnb4) for each size. The catalog is
@@ -148,6 +167,10 @@ MODEL_CONFIGS.update(
             "quantization": quant,
             "description": f"Whisper {size} (onnx-community, {quant or 'fp32'})",
             "family": "whisper",
+            # The encoder sees a fixed 30 s window and the ONNX export silently
+            # drops audio past it, so a longer chunk would lose its tail.
+            "chunk_target_sec": 25.0,
+            "chunk_max_sec": 30.0,
         }
         for size in _WHISPER_SIZES
         for suffix, quant in _WHISPER_QUANTS.items()
@@ -188,21 +211,9 @@ if DEFAULT_MODEL not in MODEL_CONFIGS:
 # ---------------------------------------------------------------------------
 TARGET_SR = 16_000
 
-CHUNK_TARGET_SEC = _env_float("PARAKEET_CHUNK_TARGET_SEC", 60.0, minimum=0.1)
-CHUNK_MAX_SEC = _env_float("PARAKEET_CHUNK_MAX_SEC", 75.0, minimum=0.1)
+# Chunk lengths are per model (MODEL_CONFIGS). This is the shortest chunk cut
+# at a pause, capped at the model's own target.
 CHUNK_MIN_SEC = _env_float("PARAKEET_CHUNK_MIN_SEC", 20.0, minimum=0.0)
-if not CHUNK_MIN_SEC <= CHUNK_TARGET_SEC <= CHUNK_MAX_SEC:
-    raise RuntimeError(
-        "chunk durations must satisfy PARAKEET_CHUNK_MIN_SEC <= "
-        "PARAKEET_CHUNK_TARGET_SEC <= PARAKEET_CHUNK_MAX_SEC"
-    )
-
-# Whisper's encoder consumes a fixed 30 s mel window; audio past 30 s in a
-# single input is silently dropped by the ONNX export. Parakeet has no such
-# limit (hence the 60/75 s defaults above), so whisper-family models must be
-# chunked tighter or every long chunk loses its tail without any error.
-WHISPER_CHUNK_MAX_SEC = 30.0
-WHISPER_CHUNK_TARGET_SEC = 25.0
 
 # Silence gaps at least this long are cut out of chunks instead of being fed
 # to the model; long in-chunk silence measurably degrades recognition of the

@@ -17,9 +17,7 @@ from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
     ALIGN_WORDS,
-    CHUNK_MAX_SEC,
     CHUNK_MIN_SEC,
-    CHUNK_TARGET_SEC,
     CPU_INFO,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
@@ -31,8 +29,6 @@ from .config import (
     SPOKEN_NUMBERS,
     TARGET_SR,
     UPLOAD_READ_CHUNK_BYTES,
-    WHISPER_CHUNK_MAX_SEC,
-    WHISPER_CHUNK_TARGET_SEC,
     logger,
 )
 from .model import default_model_name, loaded_models
@@ -149,19 +145,11 @@ def _family(model_name: str) -> str:
     return MODEL_CONFIGS[model_name].get("family", "parakeet")
 
 
-def _chunk_bounds(family: str) -> Tuple[float, float, float]:
-    """(target, max, min) seconds for chunking, per model family.
-
-    Whisper's encoder only sees 30 s per input, so it is chunked tighter than
-    Parakeet; otherwise every chunk past 30 s loses its tail silently.
-    """
-    if family == "whisper":
-        return (
-            WHISPER_CHUNK_TARGET_SEC,
-            WHISPER_CHUNK_MAX_SEC,
-            min(CHUNK_MIN_SEC, WHISPER_CHUNK_TARGET_SEC),
-        )
-    return CHUNK_TARGET_SEC, CHUNK_MAX_SEC, CHUNK_MIN_SEC
+def _chunk_bounds(model_name: str) -> Tuple[float, float, float]:
+    """(target, max, min) seconds for chunking this model (config.MODEL_CONFIGS)."""
+    config = MODEL_CONFIGS[model_name]
+    target = config["chunk_target_sec"]
+    return target, config["chunk_max_sec"], min(CHUNK_MIN_SEC, target)
 
 
 def _validate_format(response_format: str) -> str:
@@ -206,9 +194,9 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
 
 def _prepare_audio(
     raw: bytes,
-    target_sec: float = CHUNK_TARGET_SEC,
-    max_sec: float = CHUNK_MAX_SEC,
-    min_sec: float = CHUNK_MIN_SEC,
+    target_sec: float,
+    max_sec: float,
+    min_sec: float,
 ) -> _PreparedAudio:
     waveform = load_audio(raw)
     duration = float(waveform.size) / TARGET_SR
@@ -708,7 +696,7 @@ async def transcribe(
     del prompt, temperature  # accepted for OpenAI client compatibility
     model_name = _validate_model(model)
     family = _family(model_name)
-    target_sec, max_sec, min_sec = _chunk_bounds(family)
+    target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     output_format = _validate_format(response_format)
     granularities = set(timestamp_granularities or []) | set(
         timestamp_granularities_plain or []
@@ -805,7 +793,7 @@ async def transcribe_batch(
             detail=f"Batch contains {len(files)} files; limit is {MAX_BATCH_FILES}",
         )
     model_name = _validate_model(model)
-    target_sec, max_sec, min_sec = _chunk_bounds(_family(model_name))
+    target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     filenames = [upload.filename or "unnamed" for upload in files]
 
     raws: List[bytes] = []
