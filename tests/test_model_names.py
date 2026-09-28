@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import pytest
-from fastapi import HTTPException
+import inspect
 
-from parakeet_service import routes
-from parakeet_service.config import MODEL_ALIASES, MODEL_CONFIGS
+import pytest
+from fastapi import HTTPException, params
+
+from parakeet_service import config, routes
+from parakeet_service.config import MODEL_CONFIGS
+from parakeet_service.model import variant_key
 from parakeet_service.routes import _validate_model
 
 
@@ -13,16 +16,33 @@ def test_short_names_resolve():
         assert _validate_model(name) == name
 
 
-def test_old_names_still_work():
-    for alias, target in MODEL_ALIASES.items():
-        assert target in MODEL_CONFIGS
-        assert _validate_model(alias) == target
-        assert _validate_model(alias.upper()) == target
+@pytest.mark.parametrize("handler", [routes.transcribe, routes.transcribe_batch])
+def test_model_is_required_and_quantization_optional(handler):
+    # No default model: a request without one is a 422 from FastAPI.
+    parameters = inspect.signature(handler).parameters
+    model, quantization = parameters["model"].default, parameters["quantization"].default
+    assert isinstance(model, params.Form) and model.is_required()
+    assert isinstance(quantization, params.Form) and quantization.default is None
 
 
 def test_unknown_model_rejected():
     with pytest.raises(HTTPException):
         _validate_model("parakeet-v99")
+
+
+def test_quantization_defaults_to_fp32_whatever_the_hardware():
+    assert variant_key("parakeet-v3") == "parakeet-v3:fp32"
+    assert variant_key("Whisper-Tiny", "FP16") == "whisper-tiny:fp16"
+    # fp32 is the default, so every model must have it.
+    for name, entry in MODEL_CONFIGS.items():
+        assert "fp32" in entry["quantizations"], name
+
+
+def test_unknown_quantization_is_a_400_naming_the_choices():
+    with pytest.raises(HTTPException) as err:
+        routes._variant("parakeet-v3", "q4")
+    assert err.value.status_code == 400
+    assert "fp16" in err.value.detail and "int8" in err.value.detail
 
 
 def test_models_endpoint_lists_catalog():
@@ -33,93 +53,50 @@ def test_models_endpoint_lists_catalog():
         assert card["object"] == "model"
         assert card["task"] == "automatic-speech-recognition"
         assert card["language"]
-    v2_cards = [c for c in listing["data"] if c["id"].startswith("parakeet-v2")]
-    assert all(c["language"] == ["en"] for c in v2_cards)
+        assert card["quantizations"] == ["fp32", "fp16", "int8"]
     cards_by_id = {c["id"]: c for c in listing["data"]}
-    assert cards_by_id["parakeet-v3-int8"]["aliases"] == ["parakeet-tdt-0.6b-v3"]
-    assert cards_by_id["parakeet-v3-fp32"]["aliases"] == [
-        "istupakov/parakeet-tdt-0.6b-v3-onnx",
-        "parakeet-v3",
-    ]
+    assert cards_by_id["parakeet-v2"]["language"] == ["en"]
+    assert cards_by_id["parakeet-v3"]["owned_by"] == "nvidia"
 
 
-def test_models_endpoint_retrieve_resolves_aliases():
-    card = routes.retrieve_model("istupakov/parakeet-tdt-0.6b-v3-onnx")
-    assert card["id"] == "parakeet-v3-fp32"
-    with pytest.raises(HTTPException) as err:
-        routes.retrieve_model("parakeet-v99")
-    assert err.value.status_code == 404
+def test_models_endpoint_retrieve():
+    assert routes.retrieve_model("Parakeet-V3")["id"] == "parakeet-v3"
+    for gone in ("parakeet-v99", "parakeet-v3-fp32"):  # 2.0 dropped the -quant names
+        with pytest.raises(HTTPException) as err:
+            routes.retrieve_model(gone)
+        assert err.value.status_code == 404
 
 
 def test_whisper_registered_and_card_is_not_parakeet():
-    assert "whisper-base" in MODEL_CONFIGS
-    assert _validate_model("whisper-turbo") == "whisper-large-v3-turbo"  # alias
-    assert _validate_model("WHISPER-LARGE") == "whisper-large-v3"
     card = routes.retrieve_model("whisper-base")
     assert card["owned_by"] == "openai"
     # Whisper's real multilingual set, not the Parakeet list or a bare ["auto"].
-    assert card["language"] == routes._WHISPER_LANGUAGES
+    assert card["language"] == config._WHISPER_LANGUAGES
     assert len(card["language"]) == 99 and "zh" in card["language"]
-    assert card["language"] != routes._V3_LANGUAGES
+    assert card["language"] != config._V3_LANGUAGES
 
 
-def test_whisper_quant_matrix_shares_one_repo():
-    # Bare name = fp32 default; -fp16 (GPU) and -int8 (CPU) mirror the parakeet split.
-    assert MODEL_CONFIGS["whisper-small"]["quantization"] is None
-    assert MODEL_CONFIGS["whisper-small-fp16"]["quantization"] == "fp16"
-    assert MODEL_CONFIGS["whisper-small-int8"]["quantization"] == "int8"
-    repos = {
-        MODEL_CONFIGS[f"whisper-small{s}"]["hf_id"] for s in ("", "-fp16", "-int8")
+def test_whisper_quantizations_share_one_repo():
+    assert MODEL_CONFIGS["whisper-small"]["quantizations"] == {
+        "fp32": ("onnx-community/whisper-small", None),
+        "fp16": ("onnx-community/whisper-small", "fp16"),
+        "int8": ("onnx-community/whisper-small", "int8"),
     }
-    assert repos == {"onnx-community/whisper-small"}
 
 
-def test_whisper_english_variant_reports_en_despite_quant_suffix():
-    assert routes.retrieve_model("whisper-base.en-int8")["language"] == ["en"]
-    assert routes.retrieve_model("whisper-base")["language"] == routes._WHISPER_LANGUAGES
+def test_whisper_english_model_reports_en():
+    assert routes.retrieve_model("whisper-base.en")["language"] == ["en"]
+    assert routes.retrieve_model("whisper-base")["language"] == config._WHISPER_LANGUAGES
 
 
 def test_chunk_bounds_are_tighter_for_whisper_and_parakeet_v2():
-    p_target, p_max, _ = routes._chunk_bounds("parakeet-v3-fp32")
-    for name in ("whisper-base", "parakeet-v2-int8", "parakeet-v2-fp32"):
+    p_target, p_max, _ = routes._chunk_bounds("parakeet-v3")
+    for name in ("whisper-base", "parakeet-v2"):
         target, maximum, _ = routes._chunk_bounds(name)
         assert maximum <= 30.0 < p_max
         assert target < p_target
 
 
 def test_every_model_states_its_chunk_bounds():
-    for name, config in MODEL_CONFIGS.items():
-        assert 0 < config["chunk_target_sec"] <= config["chunk_max_sec"], name
-
-
-def test_explicit_default_skips_probe(monkeypatch):
-    from parakeet_service import model as m
-
-    monkeypatch.setattr(m, "_DEFAULT_MODEL_NAME", None)
-    monkeypatch.setattr(m, "DEFAULT_MODEL_EXPLICIT", True)
-    monkeypatch.setattr(m, "DEFAULT_MODEL", "parakeet-v2-int8")
-    monkeypatch.setattr(m, "USE_GPU", "auto")
-    monkeypatch.setattr(
-        m, "_preload_cuda_libraries",
-        lambda: (_ for _ in ()).throw(AssertionError("must not probe")),
-    )
-    assert m.default_model_name() == "parakeet-v2-int8"
-
-
-def test_auto_default_probes_cuda(monkeypatch):
-    from parakeet_service import model as m
-
-    monkeypatch.setattr(m, "DEFAULT_MODEL_EXPLICIT", False)
-    monkeypatch.setattr(m, "USE_GPU", "auto")
-    monkeypatch.setattr(m, "_preload_cuda_libraries", lambda: True)
-
-    monkeypatch.setattr(m, "_DEFAULT_MODEL_NAME", None)
-    monkeypatch.setattr(
-        m.ort, "get_available_providers",
-        lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
-    )
-    assert m.default_model_name() == m.GPU_DEFAULT_MODEL
-
-    monkeypatch.setattr(m, "_DEFAULT_MODEL_NAME", None)
-    monkeypatch.setattr(m.ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
-    assert m.default_model_name() == m.CPU_DEFAULT_MODEL
+    for name, entry in MODEL_CONFIGS.items():
+        assert 0 < entry["chunk_target_sec"] <= entry["chunk_max_sec"], name

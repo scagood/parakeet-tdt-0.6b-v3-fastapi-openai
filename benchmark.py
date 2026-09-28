@@ -48,7 +48,7 @@ def get_file_size_mb(file_path: str) -> float:
 
 
 def transcribe_audio(
-    file_path: str, model: str = "whisper-1", format: str = "text"
+    file_path: str, model: str = "parakeet-v3", format: str = "text"
 ) -> dict:
     """Transcribe audio file and return results with timing"""
     start_time = time.time()
@@ -140,7 +140,7 @@ def run_benchmark(audio_files: list, num_runs: int = 3):
             baseline_stats = get_process_stats(service_pid) if service_pid != -1 else {}
 
             # Transcribe
-            result = transcribe_audio(audio_file, model="whisper-1", format="text")
+            result = transcribe_audio(audio_file, model="parakeet-v3", format="text")
 
             # Get stats after transcription
             post_stats = get_process_stats(service_pid) if service_pid != -1 else {}

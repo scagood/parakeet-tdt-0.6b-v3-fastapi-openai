@@ -11,8 +11,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .batchworker import build_worker
-from .config import AUDIO_WORKERS, WARMUP, WARMUP_SEC, WARMUP_TIMEOUT_SEC, logger
-from .model import default_model_name, get_model, load_model, warmup_waveform
+from .config import (
+    AUDIO_WORKERS,
+    PRELOAD_MODELS,
+    WARMUP,
+    WARMUP_SEC,
+    WARMUP_TIMEOUT_SEC,
+    logger,
+)
+from .model import get_model, load_model, variant_key, warmup_waveform
 from .routes import router
 
 
@@ -32,8 +39,8 @@ def _exit_without_join(message: str) -> None:
     os._exit(1)
 
 
-async def _warmup(app: FastAPI) -> None:
-    """Push one synthetic chunk through the real inference path.
+async def _warmup(app: FastAPI, model_key: str) -> None:
+    """Push one synthetic chunk through a preloaded model's real inference path.
 
     Failure is fatal. The chunk is what every real request looks like, so a
     model that cannot run it would 500 every request while passing readiness.
@@ -45,7 +52,7 @@ async def _warmup(app: FastAPI) -> None:
     started = time.perf_counter()
     try:
         await asyncio.wait_for(
-            app.state.worker.submit(warmup_waveform(), default_model_name()),
+            app.state.worker.submit(warmup_waveform(), model_key),
             timeout=WARMUP_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
@@ -57,7 +64,7 @@ async def _warmup(app: FastAPI) -> None:
         raise RuntimeError(message) from None  # only reached when _exit_without_join is stubbed
     except Exception as exc:
         raise RuntimeError("warm-up inference failed") from exc
-    logger.info("Warm-up completed in %.2fs", time.perf_counter() - started)
+    logger.info("Warm-up of %s completed in %.2fs", model_key, time.perf_counter() - started)
 
 
 @asynccontextmanager
@@ -73,12 +80,16 @@ async def lifespan(app: FastAPI):
     # worker-count knob if their throughput matters.
     app.state.align_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="align")
     try:
-        logger.info("Lifespan startup: loading default model")
-        await asyncio.to_thread(load_model)
+        # An unknown model or quantization fails startup, as it would 400 a request.
+        preload = [variant_key(*entry.split(":", 1)) for entry in PRELOAD_MODELS]
+        for key in preload:
+            logger.info("Lifespan startup: preloading %s", key)
+            await asyncio.to_thread(load_model, key)
         app.state.worker = build_worker(get_model)
         await app.state.worker.start()
         if WARMUP and WARMUP_SEC > 0:
-            await _warmup(app)
+            for key in preload:
+                await _warmup(app, key)
         app.state.ready = True
         logger.info("Service ready")
         yield

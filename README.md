@@ -27,8 +27,8 @@ Compared to the legacy Flask+Waitress service on a 12700KF CPU:
 | 16× 10 s concurrent     | 34.6× throughput  | **39.3× throughput**| +13%    |
 
 The service defaults to CUDA with GPU micro-batching. The numbers below were
-measured on the FP32 profile, which was the default when they were taken; the
-GPU default is now `parakeet-v3-fp16`, which halves VRAM at the same output.
+measured at FP32, the default precision; on GPU, `quantization=fp16` halves
+VRAM at the same output.
 
 | Workload                | CPU optimized      | GPU profile (FP32) | Δ        |
 |-------------------------|--------------------|--------------------|----------|
@@ -41,7 +41,7 @@ rationale, and tunable env knobs.
 ```bash
 python server.py                  # serve on :5092
 
-# CPU override (selects parakeet-v3-fp32, the CPU default)
+# CPU override
 PARAKEET_USE_GPU=false \
 PARAKEET_BATCHED=0 \
 python server.py
@@ -153,7 +153,7 @@ For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pin
 Two defaults matter when replicas start and stop frequently:
 
 * **CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is invisible to `sched_getaffinity()` and `psutil`, which keep reporting the node's full core count. Thread pools are now sized from the cgroup quota when one is present, so a 4-core pod no longer starts dozens of ORT threads. The quota is read from the process's own cgroup (via `/proc/self/cgroup`) and its ancestors, so it is found under systemd `CPUQuota=` and `--cgroupns=host` as well as in a private cgroup namespace. `/health` reports `cgroup_quota` next to the detected core counts so you can confirm what was applied.
-* **Cold start.** `PARAKEET_WARMUP` (on by default) pushes one synthetic chunk through the model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. A warm-up that fails, or exceeds `PARAKEET_WARMUP_TIMEOUT_SEC` (default `120`), fails startup rather than reporting a replica ready that cannot run inference — raise the timeout on a slow host, or set `PARAKEET_WARMUP=false` to skip it. Container healthcheck `start_period` values in the Dockerfiles and `docker-compose.yml` allow for model load plus the default timeout; raise them by the same amount if you raise the timeout. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
+* **Cold start.** List the models a replica should serve warm in `PARAKEET_PRELOAD_MODELS` (comma-separated `model` or `model:quantization`, e.g. `parakeet-v3`); nothing is preloaded by default. `PARAKEET_WARMUP` (on by default) then pushes one synthetic chunk through each preloaded model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. A warm-up that fails, or exceeds `PARAKEET_WARMUP_TIMEOUT_SEC` (default `120`), fails startup rather than reporting a replica ready that cannot run inference — raise the timeout on a slow host, or set `PARAKEET_WARMUP=false` to skip it. Container healthcheck `start_period` values in the Dockerfiles and `docker-compose.yml` allow for model load plus the default timeout; raise them by the same amount if you raise the timeout. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
 
 ## Installation
 
@@ -218,7 +218,7 @@ client = OpenAI(
 
 audio_file = open("audio.mp3", "rb")
 transcript = client.audio.transcriptions.create(
-  model="parakeet-v3-fp32",  # omit to use the server default; see Model Selection
+  model="parakeet-v3",  # required; see Model Selection
   file=audio_file,
   response_format="text"
 )
@@ -228,38 +228,42 @@ print(transcript)
 
 ### Model Selection
 
-Six variants are served. `GET /v1/models` returns these names, each with its
-aliases in an `aliases` field; `GET /v1/models/{id}` accepts either form.
+Every request must name its `model`; there is no server default, and a request
+without one is rejected with 422. Precision is a separate, optional
+`quantization` field: `fp32` (the default, on any hardware), `fp16` or `int8`.
+`GET /v1/models` lists every model with the languages it transcribes and the
+quantizations it offers.
 
-| Model Name | Precision | ONNX weights | Languages | Former names, still accepted |
-|------------|-----------|--------------|-----------|------------------------------|
-| `parakeet-v3-fp32` | FP32 | `istupakov/parakeet-tdt-0.6b-v3-onnx` | 25 | `parakeet-v3`, `istupakov/parakeet-tdt-0.6b-v3-onnx` |
-| `parakeet-v3-fp16` | FP16 | `grikdotnet/parakeet-tdt-0.6b-fp16` | 25 | `grikdotnet/parakeet-tdt-0.6b-fp16` |
-| `parakeet-v3-int8` | INT8 | `nemo-parakeet-tdt-0.6b-v3` | 25 | `parakeet-tdt-0.6b-v3` |
-| `parakeet-v2-fp32` | FP32 | `istupakov/parakeet-tdt-0.6b-v2-onnx` | English only | `parakeet-v2`, `istupakov/parakeet-tdt-0.6b-v2-onnx` |
-| `parakeet-v2-fp16` | FP16 | `ysdede/parakeet-tdt-0.6b-v2-onnx` | English only | — |
-| `parakeet-v2-int8` | INT8 | `nemo-parakeet-tdt-0.6b-v2` | English only | `parakeet-tdt-0.6b-v2` |
+| Model | Languages | fp32 | fp16 | int8 |
+|-------|-----------|------|------|------|
+| `parakeet-v3` | 25 | `istupakov/parakeet-tdt-0.6b-v3-onnx` | `grikdotnet/parakeet-tdt-0.6b-fp16` | `istupakov/parakeet-tdt-0.6b-v3-onnx` |
+| `parakeet-v2` | English only | `istupakov/parakeet-tdt-0.6b-v2-onnx` | `ysdede/parakeet-tdt-0.6b-v2-onnx` | `istupakov/parakeet-tdt-0.6b-v2-onnx` |
 
-**Defaults.** FP16 halves VRAM at identical output on GPU, so a GPU deployment
-defaults to `parakeet-v3-fp16`. On CPU, ONNX Runtime upcasts FP16 (slower), so
-`PARAKEET_USE_GPU=false` defaults to `parakeet-v3-fp32`. With
-`PARAKEET_USE_GPU=auto` the choice is made at startup by probing whether CUDA
-actually loads on the host. `PARAKEET_DEFAULT_MODEL` overrides all three, and
-`GET /health` reports the model that was resolved.
+Whisper is served as `whisper-tiny`, `whisper-base`, `whisper-small`,
+`whisper-medium`, `whisper-large-v3` and `whisper-large-v3-turbo` (99
+languages), plus English-only `whisper-tiny.en`, `whisper-base.en`,
+`whisper-small.en` and `whisper-medium.en`, each in all three quantizations.
+
+**Choosing a precision.** FP16 halves VRAM at identical output on GPU
+(measured on Parakeet v3), so ask for `fp16` there. On CPU, ONNX Runtime
+upcasts FP16 (slower), so keep `fp32`.
 
 INT8 is the fastest on CPU but measurably drops words after silences, and the
 multilingual benchmark above shows it ~4 WER points worse than FP32 on Spanish.
 Pick it deliberately rather than by default.
 
-The default model is loaded before the service reports ready; the others are
-lazy-loaded on first use and cached afterwards.
+Models named in `PARAKEET_PRELOAD_MODELS` (as `model` for fp32, or
+`model:quantization`) are loaded (and warmed up) before the service reports
+ready; the others are lazy-loaded on first use and cached afterwards. A
+preloaded model is never used for a request that names another.
 
-**To select a model via API:**
+**To select a model and precision via API:**
 ```python
 transcript = client.audio.transcriptions.create(
-  model="parakeet-v3-fp16",  # Select the FP16 variant
+  model="parakeet-v3",
   file=audio_file,
-  response_format="text"
+  response_format="text",
+  extra_body={"quantization": "fp16"},  # omit for fp32
 )
 ```
 
@@ -283,7 +287,7 @@ where the server default is on). Requests that don't say get
 
 ```python
 transcript = client.audio.transcriptions.create(
-  model="parakeet-v3-fp32",
+  model="parakeet-v3",
   file=audio_file,
   response_format="verbose_json",
   timestamp_granularities=["word"],
@@ -422,7 +426,7 @@ Flask service and was never served by `server.py`.
     - Set **STT Engine** to `OpenAI`
     - Set **OpenAI Base URL** to `http://127.0.0.1:5092/v1`
     - Set **OpenAI API Key** to `sk-no-key-required`
-    - Set **STT Model** to `parakeet-v3-fp32` (or leave it as the server default)
+    - Set **STT Model** to `parakeet-v3` (required: the server has no default model)
     - Click **Save**
 
 3.  **Start Using Voice!**

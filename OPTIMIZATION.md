@@ -33,7 +33,7 @@ Default GPU command:
 
 ```bash
 PARAKEET_USE_GPU=true \
-PARAKEET_DEFAULT_MODEL=istupakov/parakeet-tdt-0.6b-v3-onnx \
+PARAKEET_PRELOAD_MODELS=parakeet-v3 \
 PARAKEET_BATCHED=1 \
 PARAKEET_MAX_BATCH_SIZE=4 \
 PARAKEET_BATCH_WINDOW_MS=4 \
@@ -46,7 +46,7 @@ CPU override:
 
 ```bash
 PARAKEET_USE_GPU=false \
-PARAKEET_DEFAULT_MODEL=parakeet-tdt-0.6b-v3 \
+PARAKEET_PRELOAD_MODELS=parakeet-v3:int8 \
 PARAKEET_BATCHED=0 \
 PARAKEET_ORT_INTRA_THREADS=12 \
 python server.py
@@ -164,7 +164,8 @@ parakeet-tdt-0.6b-v3-fastapi-openai/
 
 Key endpoints (unchanged contract):
 
-- `POST /v1/audio/transcriptions` — multipart `file=`, `model=`,
+- `POST /v1/audio/transcriptions` — multipart `file=`, `model=`, optional
+  `quantization=fp32|fp16|int8` (default `fp32`),
   `response_format=json|text|srt|vtt|verbose_json`,
   `timestamp_granularities[]=segment|word`.
 - `POST /v1/audio/transcriptions/batch` — multiple files in one call.
@@ -179,7 +180,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_HOST`            | `0.0.0.0`    | bind host                                                |
 | `PARAKEET_PORT`            | `5092`       | bind port (matches the legacy service)                   |
 | `PARAKEET_MODELS_DIR`      | `./models`   | Hugging Face cache directory for the ONNX weights        |
-| `PARAKEET_DEFAULT_MODEL`   | `parakeet-v3-fp16` on GPU, `parakeet-v3-fp32` on CPU | default model when the form field is omitted; overrides the GPU/CPU choice |
+| `PARAKEET_PRELOAD_MODELS`  | empty        | comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before ready; requests must still name `model=` |
 | `PARAKEET_INFER_WORKERS`   | `min(4, logical CPUs ÷ intra-op threads)` | parallel ORT workers in `InferencePool` when `PARAKEET_BATCHED=0`; logical CPUs are clamped to the cgroup quota |
 | `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU      |
 | `PARAKEET_USE_GPU`         | `true`       | `true` / `auto` / `false`                                |
@@ -249,7 +250,7 @@ python server.py
 
 # Default RTX 3090 profile
 PARAKEET_USE_GPU=true \
-PARAKEET_DEFAULT_MODEL=istupakov/parakeet-tdt-0.6b-v3-onnx \
+PARAKEET_PRELOAD_MODELS=parakeet-v3 \
 PARAKEET_BATCHED=1 \
 PARAKEET_MAX_BATCH_SIZE=4 \
 PARAKEET_BATCH_WINDOW_MS=4 \
