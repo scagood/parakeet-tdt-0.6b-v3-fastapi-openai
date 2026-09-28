@@ -215,6 +215,10 @@ if VAD_THRESHOLD > 1.0:
 VAD_MIN_SILENCE_MS = _env_int("PARAKEET_VAD_MIN_SILENCE_MS", 400, minimum=1)
 VAD_SPEECH_PAD_MS = _env_int("PARAKEET_VAD_SPEECH_PAD_MS", 120, minimum=0)
 
+# Loaded models are cached forever by default (0 = unbounded). Set a small N to
+# LRU-evict all but the N most-recent when sweeping many models on limited RAM.
+MODEL_CACHE_SIZE = _env_int("PARAKEET_MODEL_CACHE_SIZE", 0, minimum=0)
+
 GPU_DEVICE_ID = _env_int("PARAKEET_GPU_DEVICE_ID", 0, minimum=0)
 BATCHED = _env_bool("PARAKEET_BATCHED", USE_GPU != "false")
 MAX_BATCH_SIZE = _env_int("PARAKEET_MAX_BATCH_SIZE", 4)
