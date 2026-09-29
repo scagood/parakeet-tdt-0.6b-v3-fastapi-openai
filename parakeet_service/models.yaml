@@ -25,9 +25,10 @@
 # refused, which catches a `files` left out.
 #
 # A request names the model and may pick a quantization; without one it gets
-# fp32, the reference precision, whatever the hardware. FP16 halves VRAM
-# (identical output measured on Parakeet v3) but ONNX Runtime upcasts it on CPU,
-# which is slower; int8 measurably drops words after silences.
+# fp32, the reference precision, whatever the hardware. FP16 halves VRAM on a
+# GPU but ONNX Runtime upcasts it on CPU, which is slower. istupakov's
+# parakeet-v3 int8 measurably dropped words after silences; see the
+# parakeet-v3 entry for what replaced it.
 #
 # Whisper repos are onnx-community's except where its export is broken (#35):
 # the bare medium and large-v3 repos are empty (the exports live under -ONNX),
@@ -67,6 +68,22 @@ languages:
   english: &english ["en"]
 
 models:
+  # parakeet-v3's three precisions are Olicorne's re-export of NVIDIA's .nemo
+  # checkpoint (#42), picked on CPU only: on the #36 English chapter (648 s)
+  # fp32/fp16/int8 scored 1.13/1.07/1.20% WER against 1.20/1.20/1.83% for the
+  # exports they replaced; int8 also ran ~25% faster, fp32 the same speed.
+  # NOT TESTED ON A GPU. If CUDA misbehaves (a load error;
+  # PARAKEET_USE_GPU=true refusing a session that didn't bind to CUDA; int8
+  # slow because its 8-bit MatMulNBits nodes fall back to CPU; fp16 output
+  # drifting from fp32), put that precision back to what it was before #42
+  # (onnx-asr's standard file names at the repo root):
+  #   fp32  istupakov/parakeet-tdt-0.6b-v3-onnx  8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce
+  #         encoder-model.onnx + encoder-model.onnx.data, decoder_joint-model.onnx
+  #   fp16  grikdotnet/parakeet-tdt-0.6b-fp16    dc9871ec5ad84a420940077e76e8741b3609bf8b
+  #         encoder-model.fp16.onnx, decoder_joint-model.fp16.onnx
+  #   int8  istupakov/parakeet-tdt-0.6b-v3-onnx  8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce
+  #         encoder-model.int8.onnx, decoder_joint-model.int8.onnx
+  #   (each also vocab.txt and config.json from the same repo)
   parakeet-v3:
     family: parakeet
     onnx_asr_type: nemo-conformer-tdt
@@ -75,22 +92,29 @@ models:
     chunk_max_sec: 75.0
     quantizations:
       fp32:
-        repo: istupakov/parakeet-tdt-0.6b-v3-onnx
-        revision: "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+        repo: Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx
+        revision: "9d104194420cfe48c3374385bb42b42a788b9225"
         files:
-          encoder-model.onnx.data: encoder-model.onnx.data
+          encoder-model.onnx: fp32/encoder-model.onnx
+          encoder-model.onnx.data.000: fp32/encoder-model.onnx.data.000
+          encoder-model.onnx.data.001: fp32/encoder-model.onnx.data.001
+          decoder_joint-model.onnx: fp32/decoder_joint-model.onnx
+          decoder_joint-model.onnx.data: fp32/decoder_joint-model.onnx.data
       fp16:
-        repo: grikdotnet/parakeet-tdt-0.6b-fp16
-        revision: "dc9871ec5ad84a420940077e76e8741b3609bf8b"
+        # Olicorne ships no fp16 decoder; its README pairs the fp16 encoder
+        # with the fp32 one (73 MB), which is what was measured.
+        repo: Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx
+        revision: "9d104194420cfe48c3374385bb42b42a788b9225"
         files:
-          encoder-model.onnx: encoder-model.fp16.onnx
-          decoder_joint-model.onnx: decoder_joint-model.fp16.onnx
+          encoder-model.onnx: fp16/encoder-model.fp16.onnx
+          decoder_joint-model.onnx: fp32/decoder_joint-model.onnx
+          decoder_joint-model.onnx.data: fp32/decoder_joint-model.onnx.data
       int8:
-        repo: istupakov/parakeet-tdt-0.6b-v3-onnx
-        revision: "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+        repo: Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx
+        revision: "9d104194420cfe48c3374385bb42b42a788b9225"
         files:
-          encoder-model.onnx: encoder-model.int8.onnx
-          decoder_joint-model.onnx: decoder_joint-model.int8.onnx
+          encoder-model.onnx: int8/encoder-model.int8.onnx
+          decoder_joint-model.onnx: int8/decoder_joint-model.int8.onnx
   parakeet-v2:
     family: parakeet
     onnx_asr_type: nemo-conformer-tdt

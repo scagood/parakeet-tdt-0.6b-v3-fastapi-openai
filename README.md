@@ -236,7 +236,7 @@ quantizations it offers.
 
 | Model | Languages | fp32 | fp16 | int8 |
 |-------|-----------|------|------|------|
-| `parakeet-v3` | 25 | `istupakov/parakeet-tdt-0.6b-v3-onnx` | `grikdotnet/parakeet-tdt-0.6b-fp16` | `istupakov/parakeet-tdt-0.6b-v3-onnx` |
+| `parakeet-v3` | 25 | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` (fp16 encoder, fp32 decoder) | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` |
 | `parakeet-v2` | English only | `istupakov/parakeet-tdt-0.6b-v2-onnx` | `ysdede/parakeet-tdt-0.6b-v2-onnx` | `istupakov/parakeet-tdt-0.6b-v2-onnx` |
 
 Whisper is served as `whisper-tiny`, `whisper-base`, `whisper-small`,
@@ -244,13 +244,22 @@ Whisper is served as `whisper-tiny`, `whisper-base`, `whisper-small`,
 languages), plus English-only `whisper-tiny.en`, `whisper-base.en`,
 `whisper-small.en` and `whisper-medium.en`, each in all three quantizations.
 
-**Choosing a precision.** FP16 halves VRAM at identical output on GPU
-(measured on Parakeet v3), so ask for `fp16` there. On CPU, ONNX Runtime
-upcasts FP16 (slower), so keep `fp32`.
+**Choosing a precision.** FP16 halves VRAM on GPU, so ask for `fp16` there.
+On CPU, ONNX Runtime upcasts FP16 (slower), so keep `fp32`.
 
-INT8 is the fastest on CPU but measurably drops words after silences, and the
-multilingual benchmark above shows it ~4 WER points worse than FP32 on Spanish.
-Pick it deliberately rather than by default.
+`parakeet-v3` runs Olicorne's re-export of NVIDIA's `.nemo` checkpoint in all
+three precisions. On a 648 s English audiobook chapter it scored 1.13% (fp32),
+1.07% (fp16) and 1.20% (int8) WER against 1.20%, 1.20% and 1.83% for the
+istupakov/grikdotnet exports it replaced, with int8 ~25% faster. It was chosen
+on CPU and has **not been tested on a GPU** or outside English; the
+`parakeet-v3` entry in `parakeet_service/models.yaml` lists what to revert to if
+CUDA gives trouble.
+
+INT8 is the fastest on CPU. istupakov's `parakeet-v3` int8 measurably dropped
+words after silences, and the multilingual benchmark above shows it ~4 WER
+points worse than FP32 on Spanish; Olicorne's, which replaced it, matched FP32
+on the English chapter above but has no multilingual numbers yet. Pick INT8
+deliberately rather than by default.
 
 Models named in `PARAKEET_PRELOAD_MODELS` (as `model` for fp32, or
 `model:quantization`) are loaded (and warmed up) before the service reports
