@@ -333,10 +333,15 @@ A request names the aligner, as it names the model: send the form field
 There is no default aligner: a request that names none gets Parakeet's times.
 `GET /v1/aligners` lists them, like `GET /v1/models`:
 
-| Aligner | Languages | License |
-|---|---|---|
-| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | Apache-2.0 |
-| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | Parakeet v3's other 24 | Apache-2.0 |
+| Aligner | Languages | Error, start / end (English TTS) | License |
+|---|---|---|---|
+| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
+| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
+| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
+| [`mms-300m-forced-aligner`](https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX) | `en` | 37 / 106 ms | **CC-BY-NC-4.0: non-commercial only** |
+
+Each is offered at `int8` (the default) and `fp32`, which is about as accurate
+and 4x the download.
 
 ```python
 transcript = client.audio.transcriptions.create(
@@ -390,9 +395,9 @@ The aligner only runs when the request names one and words are returned (and
 for [spoken numbers](#spoken-numbers)), one request at a time on its own thread
 pool so it never holds up other requests' audio decoding. Each aligner
 downloads on the first request that names it (int8: ~95 MB for
-`wav2vec2-base-960h`, ~330 MB for `omnilingual-ctc-300m`) and runs on CPU,
-adding roughly 2 s per 30 s of audio on a 4-core machine for the first and 4 s
-for the second. If a download fails, word times fall back to Parakeet's and the
+`wav2vec2-base-960h`, ~320 MB for the others; fp32 is 4x) and runs on CPU,
+adding roughly 2 s per 30 s of audio on a 4-core machine for
+`wav2vec2-base-960h` and 3 s for the others. If a download fails, word times fall back to Parakeet's and the
 load is retried every 5 minutes; `/health` reports each aligner's state per
 quantization under `aligner`.
 
