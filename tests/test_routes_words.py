@@ -143,13 +143,13 @@ async def _transcribe(
     return json.loads(response.body) if response_format.endswith("json") else response.body.decode()
 
 
-async def _batch(*texts, spoken_numbers=None, aligner_name=None, aligner_quantization=None):
+async def _batch(*texts, spoken_numbers=None, aligner_name=None, aligner_quantization=None, model="parakeet-v3"):
     state = _state()
     try:
         body = await routes.transcribe_batch(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             files=[UploadFile(io.BytesIO(text.encode()), filename=f"{i}.wav") for i, text in enumerate(texts)],
-            model="parakeet-v3",
+            model=model,
             quantization=None,
             spoken_numbers=spoken_numbers,
             aligner_name=aligner_name,
@@ -363,6 +363,14 @@ async def test_spoken_numbers_reach_every_response_format(calls, speak, response
     else:
         body = body["text"] if response_format == "json" else body
         assert "It cost five dollars today." in body and "$5" not in body
+
+
+@pytest.mark.asyncio
+async def test_batch_treats_an_english_only_model_as_english(calls, speak, monkeypatch):
+    # as single requests do: parakeet-v2's numbers are English whatever the default
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    assert await _batch("It cost $5.", model="parakeet-v2") == ["It cost five dollars."]
+    assert await _batch("It cost $5.") == ["It cost $5."]  # parakeet-v3: the (empty) default
 
 
 @pytest.mark.asyncio

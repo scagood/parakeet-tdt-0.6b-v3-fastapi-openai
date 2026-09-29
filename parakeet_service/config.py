@@ -220,7 +220,7 @@ def validate_aligners(aligners: Dict[str, Any]) -> None:
                 f"{name}: aligner_type {aligner_type!r} is not one of {sorted(ALIGNER_DEFAULT_FILES)}"
             )
         languages, steps = entry["languages"], entry["normalisers"]
-        # Requests match on a lowercase code without its region ("fr-CA" is "fr").
+        # Requests must send a bare lowercase code, so the catalog lists the same.
         # A bare `no` (Norwegian) arrives as False: quote language codes.
         if not isinstance(languages, list) or not languages or not all(
             isinstance(x, str) and LANGUAGE_CODE.fullmatch(x) for x in languages

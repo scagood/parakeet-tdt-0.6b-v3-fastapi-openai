@@ -17,9 +17,9 @@ from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
     ALIGNER_CONFIGS,
-    LANGUAGE_CODE,
     CHUNK_MIN_SEC,
     CPU_INFO,
+    LANGUAGE_CODE,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
     MAX_BATCH_FILES,
@@ -585,7 +585,9 @@ async def _stitch_request(
     loop, state = asyncio.get_running_loop(), request.app.state
     needs = flags.get("align") or await loop.run_in_executor(
         state.audio_pool,
-        functools.partial(_needs_aligner, results, speak=flags.get("speak", False), aligner_choice=flags.get("aligner_choice")),
+        functools.partial(
+            _needs_aligner, results, speak=flags.get("speak", False), aligner_choice=flags.get("aligner_choice")
+        ),
     )
     return await loop.run_in_executor(state.align_pool if needs else state.audio_pool, stitch)
 
@@ -721,6 +723,12 @@ def _validate_aligner_language(name: str, language: Optional[str]) -> None:
         )
 
 
+def _transcript_language(model_name: str, language: Optional[str]) -> Optional[str]:
+    """The transcript's language, for aligning and saying numbers: an
+    English-only model's words are English, whatever `language` says."""
+    return "en" if MODEL_CONFIGS[model_name]["languages"] == ["en"] else language
+
+
 def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
     """Say numbers in words: the request's `spoken_numbers`, else the server's
     PARAKEET_SPOKEN_NUMBERS; English only."""
@@ -758,9 +766,7 @@ async def transcribe(
         timestamp_granularities_plain or []
     )
     _validate_language(language)
-    # The transcript's language, for aligning and saying numbers: an
-    # English-only model's words are English, whatever `language` says.
-    heard = "en" if MODEL_CONFIGS[model_name]["languages"] == ["en"] else language
+    heard = _transcript_language(model_name, language)
     # Naming an aligner is asking for aligned word times; there is no default.
     choice = _validate_aligner(aligner_name, aligner_quantization)
     speak = _speaks(spoken_numbers, heard)
@@ -918,8 +924,10 @@ async def transcribe_batch(
         raise HTTPException(status_code=503, detail="Model is not ready")
     flat_results = await worker.submit_many(flattened, model_key)
 
-    # The batch endpoint takes no `language`: the default decides.
-    speak = _speaks(spoken_numbers, None)
+    # The batch endpoint takes no `language`: the default decides, unless the
+    # model is English-only.
+    heard = _transcript_language(model_name, None)
+    speak = _speaks(spoken_numbers, heard)
     cursor = 0
     response_items = []
     for filename, prepared in zip(filenames, prepared_files):
@@ -927,7 +935,7 @@ async def transcribe_batch(
         item_results = flat_results[cursor : cursor + count]
         cursor += count
         text, _segments, _words = await _stitch_request(
-            request, prepared, item_results, speak=speak, aligner_choice=choice
+            request, prepared, item_results, speak=speak, language=heard, aligner_choice=choice
         )
         response_items.append(
             {"filename": filename, "text": text, "duration": prepared.duration}

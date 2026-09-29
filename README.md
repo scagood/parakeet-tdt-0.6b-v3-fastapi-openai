@@ -371,7 +371,8 @@ and the languages each aligns, is set in the
   without `language` are aligned as English — send `language`. Whisper has no
   word times of its own, so it returns words only when the request names an
   aligner, and a multilingual Whisper model only when the request also names
-  the language; if any of its words can't be aligned, `words` is null.
+  the language. If a chunk can't be aligned at all, `words` is null; a word the
+  aligner can't place sits between its aligned neighbours.
 * **Numbers and symbols** are aligned as spoken by the English aligners
   (`wav2vec2-base-960h`, `wav2vec2-large-xlsr-53-english`,
   `mms-300m-forced-aligner`). `omnilingual-ctc-300m` drops numbers in every
