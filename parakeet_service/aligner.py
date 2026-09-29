@@ -93,9 +93,7 @@ def _normalize_letters(words: Sequence[str]) -> list[str]:
     said = []
     for word in words:
         text = unicodedata.normalize("NFKC", word).translate(_APOSTROPHES)
-        # ponytail: digits are dropped, not said: their audio goes to the star
-        # between words and a number keeps its model times. Per-language number
-        # words (num2words) if numbers need timing too.
+        # ponytail: digits are dropped, not said, so a number keeps its model times.
         text = "".join(c if c in "'-" or unicodedata.category(c)[0] in "LM" else " " for c in text)
         said.append(" ".join(part.strip("'-") for part in text.split()))
     return said
@@ -104,10 +102,8 @@ def _normalize_letters(words: Sequence[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Models: the catalog's `aligners` (models.yaml)
 # --------------------------------------------------------------------------- #
-# The steps a catalog aligner lists as its `normalisers`
-# (config.ALIGN_NORMALISERS), run in order: all of a chunk's words -> one
-# spoken string per word (the whole list, because a word's spoken form can
-# depend on its neighbours: "$5 million").
+# An aligner's `normalisers`, run in order over a chunk's words (the whole list:
+# a word's spoken form can depend on its neighbours, "$5 million").
 _NORMALISERS: dict[str, Callable[[Sequence[str]], list[str]]] = {
     "english": _normalize_english,
     "letters": _normalize_letters,
@@ -236,9 +232,7 @@ def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         out = session.run(None, {name: piece[None, :]})[0][0]
         frame_starts = start + _STRIDE * np.arange(out.shape[0])
         keep = (frame_starts >= core_start) & (frame_starts < core_end)
-        # Log-softmax a window at a time, in the model's float32: a float64
-        # copy of a 75 s chunk over Omnilingual's 10k tokens is 300 MB, and a
-        # path only ever widens the few tokens it visits (_star_path).
+        # Log-softmax per window in float32: a float64 copy is 300 MB at 10k tokens.
         out = out[keep]
         out -= out.max(axis=-1, keepdims=True)
         out -= np.log(np.exp(out).sum(axis=-1, keepdims=True))
@@ -315,8 +309,7 @@ def _star_path(
         return None
     anything = emission.max(axis=1) - (_STAR_PENALTY if penalty is None else penalty)
     stars = anything if separator is None else np.maximum(emission[:, separator], anything)
-    # The path only visits the blank, the star and the spoken tokens: widen
-    # those columns to float64 for the sums, not the whole vocab.
+    # Widen only the columns the path can visit, not the whole vocab.
     tokens = sorted({blank, *(token for _owner, ids in spoken for token in ids)})
     column = {token: index for index, token in enumerate(tokens)}
     emission = np.column_stack([emission[:, tokens], stars]).astype(np.float64)

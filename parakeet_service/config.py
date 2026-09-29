@@ -187,14 +187,10 @@ def validate_catalog(models: Dict[str, Any]) -> None:
             loads[key] = quant
 
 
-# What aligner.py reads for an aligner, by its `aligner_type` (the layout of the
-# export), and where each file sits in the repo unless a quantization's `files`
-# says otherwise: the fp32 layout, as ONNX_ASR_DEFAULT_FILES is for models.
+# The fp32 files an aligner reads, by `aligner_type`, as ONNX_ASR_DEFAULT_FILES is for models.
 ALIGNER_DEFAULT_FILES = {
-    # transformers.js exports (onnx-community, Xenova): a {token: id} vocab.json
-    "transformers-js": {"model.onnx": "onnx/model.onnx", "vocab.json": "vocab.json"},
-    # sherpa-onnx exports: a tokens.txt of "token id" lines
-    "sherpa-onnx": {"model.onnx": "model.onnx", "tokens.txt": "tokens.txt"},
+    "transformers-js": {"model.onnx": "onnx/model.onnx", "vocab.json": "vocab.json"},  # {token: id}
+    "sherpa-onnx": {"model.onnx": "model.onnx", "tokens.txt": "tokens.txt"},  # "token id" lines
 }
 # The steps an aligner's `normalisers` may list (aligner.py writes them).
 ALIGN_NORMALISERS = {"english", "letters", "upper", "lower"}
