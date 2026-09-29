@@ -13,14 +13,13 @@ import string
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
 from typing import Any, Callable, Container, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
 
 from . import spoken
-from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, TARGET_SR, logger
+from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, ALIGNER_CONFIGS, TARGET_SR, logger
 from .model import _build_sess_options
 
 Span = tuple[float, float]
@@ -95,81 +94,17 @@ def _normalize_omnilingual(words: Sequence[str]) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Models
+# Models: the catalog's `aligners` (models.yaml)
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class AlignModel:
-    """A character-level CTC export (wav2vec2 family) in ONNX, and its tokens.
-
-    Each takes raw 16 kHz audio normalised to zero mean and unit variance, and
-    emits a frame per 20 ms. The tokens are stated, never guessed: with the MMS
-    blank set wrong, words are still placed, but start 306 ms off, not 37 (#32).
-    """
-
-    repo: str
-    revision: str
-    onnx: str
-    # vocab.json ({token: id}) or a sherpa-onnx tokens.txt ("token id" lines)
-    vocab: str
-    blank: str
-    # The token between words; None if the model has none (the stars part them).
-    separator: Optional[str]
-
-
-ALIGN_MODELS: dict[str, AlignModel] = {
-    # Apache-2.0; English; 91 MB.
-    "wav2vec2-base-960h": AlignModel(
-        repo="onnx-community/wav2vec2-base-960h-ONNX",
-        revision="729c1a6730fb549c20a1c73a3d3f96f11020225e",
-        onnx="onnx/model_int8.onnx",
-        vocab="vocab.json",
-        blank="<pad>",
-        separator="|",
-    ),
-    # Apache-2.0 (Meta's omniASR_CTC_300M_v2, exported by sherpa-onnx); ~1600
-    # languages; 328 MB. Its vocab also has capitals, digits and punctuation,
-    # but its training text was normalised without them.
-    "omnilingual-ctc-300m": AlignModel(
-        repo="OpenVoiceOS/omnilingual-asr-ctc-300m-onnx",
-        revision="bc55e1de19af8a907b0a010d06fc4637a2d5bf0c",
-        onnx="model.int8.onnx",
-        vocab="tokens.txt",
-        blank="<s>",
-        separator=" ",
-    ),
+# An aligner's `text` -> all of a chunk's words -> one spoken string per word
+# (the whole list, because a word's spoken form can depend on its neighbours:
+# "$5 million").
+_TEXTS: dict[str, Callable[[Sequence[str]], list[str]]] = {
+    "english": _normalize_english,
+    "omnilingual": _normalize_omnilingual,
 }
-# Language -> the model that aligns it, and how its words are said to that
-# model: all of a chunk's words -> one spoken string per word (the whole list,
-# because a word's spoken form can depend on its neighbours: "$5 million").
-# English keeps its own small model; the rest of Parakeet v3's languages go to
-# Omnilingual. Adding a language is adding a line.
-ALIGN_LANGUAGES: dict[str, tuple[str, Callable[[Sequence[str]], list[str]]]] = {
-    "en": ("wav2vec2-base-960h", _normalize_english),
-    "bg": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "cs": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "da": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "de": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "el": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "es": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "et": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "fi": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "fr": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "hr": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "hu": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "it": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "lt": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "lv": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "mt": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "nl": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "pl": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "pt": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "ro": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "ru": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "sk": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "sl": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "sv": ("omnilingual-ctc-300m", _normalize_omnilingual),
-    "uk": ("omnilingual-ctc-300m", _normalize_omnilingual),
-}
+# Language -> the aligner that aligns it.
+ALIGN_LANGUAGES = {code: name for name, spec in ALIGNER_CONFIGS.items() for code in spec["languages"]}
 # Full names OpenAI clients may send instead of ISO 639-1 codes.
 _LANGUAGE_NAMES = {"english": "en"}
 
@@ -223,7 +158,7 @@ def status() -> dict[str, str]:
     """Per-model aligner state, for /health."""
     return {
         name: "loaded" if name in _loaded else "failed" if name in _failed_at else "not loaded"
-        for name in ALIGN_MODELS
+        for name in ALIGNER_CONFIGS
     }
 
 
@@ -244,22 +179,22 @@ def _load(name: str) -> Optional[tuple[Any, dict[str, int]]]:
         failed = _failed_at.get(name)
         if failed is not None and time.monotonic() - failed < _RETRY_SEC:
             return None
-        spec = ALIGN_MODELS[name]
+        spec = ALIGNER_CONFIGS[name]
         try:
             from huggingface_hub import hf_hub_download
 
             def fetch(filename: str) -> str:
-                return hf_hub_download(spec.repo, filename, revision=spec.revision)
+                return hf_hub_download(spec["repo"], filename, revision=spec["revision"])
 
             # ponytail: CPU only. On CUDA (an fp16 export) the pass would drop from
             # ~1.8 s per 30 s of audio to tens of ms; untested, so not wired (#32).
             session = ort.InferenceSession(
-                fetch(spec.onnx),
+                fetch(spec["onnx"]),
                 # Only word and spoken-number requests use it: no threads spinning between calls.
                 sess_options=_build_sess_options(ALIGN_THREADS, spinning=False),
                 providers=["CPUExecutionProvider"],
             )
-            vocab = _read_vocab(fetch(spec.vocab))
+            vocab = _read_vocab(fetch(spec["vocab"]))
         except Exception:
             _failed_at[name] = time.monotonic()
             logger.exception(
@@ -270,7 +205,7 @@ def _load(name: str) -> Optional[tuple[Any, dict[str, int]]]:
             return None
         _failed_at.pop(name, None)
         _loaded[name] = (session, vocab)
-        logger.info("Loaded word aligner %s (%s)", name, spec.repo)
+        logger.info("Loaded word aligner %s (%s)", name, spec["repo"])
         return _loaded[name]
 
 
@@ -428,13 +363,13 @@ class ChunkAligner:
     answered with "don't know" (None, or the first reading), never raised.
     """
 
-    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], model: AlignModel, normalize):
+    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], spec: dict[str, Any]):
         self._wav = wav
         self._session = session
         self._vocab = vocab
-        self._normalize = normalize
-        self._blank = vocab[model.blank]
-        self._separator = None if model.separator is None else vocab[model.separator]
+        self._normalize = _TEXTS[spec["text"]]
+        self._blank = vocab[spec["blank"]]
+        self._separator = None if spec["separator"] is None else vocab[spec["separator"]]
         self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
 
     def _emission(self) -> tuple[np.ndarray, np.ndarray]:
@@ -533,9 +468,9 @@ def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[Chunk
     """A ChunkAligner for `wav`, or None when no aligner serves `language`."""
     if not supports(language):
         return None
-    name, normalize = ALIGN_LANGUAGES[language_code(language)]
+    name = ALIGN_LANGUAGES[language_code(language)]
     loaded = _load(name)
     if loaded is None:
         return None
     session, vocab = loaded
-    return ChunkAligner(wav, session, vocab, ALIGN_MODELS[name], normalize)
+    return ChunkAligner(wav, session, vocab, ALIGNER_CONFIGS[name])

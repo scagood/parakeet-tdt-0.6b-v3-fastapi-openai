@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from parakeet_service.config import load_catalog, validate_catalog
+from parakeet_service.config import load_catalog, validate_aligners, validate_catalog
 
 _ENTRY = {
     "family": "parakeet",
@@ -40,8 +40,13 @@ def test_a_replacement_file_loads_with_anchors_and_quoted_codes(tmp_path):
         '    quantizations:\n      fp32:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
         '      fp16:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
         "        files:\n          encoder-model.onnx: encoder-model.fp16.onnx\n"
+        "aligners:\n  my-aligner:\n    repo: me/aligner\n    revision: \"" + "b" * 40 + '"\n'
+        '    onnx: model.onnx\n    vocab: tokens.txt\n    blank: "<s>"\n    separator: " "\n'
+        "    text: omnilingual\n    languages: *nordic\n"
     )
-    models = load_catalog(path)
+    catalog = load_catalog(path)
+    models = catalog["models"]
+    assert catalog["aligners"]["my-aligner"]["separator"] == " "
     assert list(models) == ["my-model"]
     assert models["my-model"]["languages"] == ["da", "no", "sv"]
     # Defaults are spelled out on load; `files` overrides only what it names.
@@ -85,6 +90,42 @@ def test_a_broken_catalog_names_the_problem(change, complaint):
 def test_model_names_must_be_lowercase():
     with pytest.raises(ValueError, match="lowercase"):
         validate_catalog({"My-Model": copy.deepcopy(_ENTRY)})
+
+
+_ALIGNER = {
+    "repo": "me/aligner",
+    "revision": "0" * 40,
+    "onnx": "model.onnx",
+    "vocab": "vocab.json",
+    "blank": "<pad>",
+    "separator": "|",
+    "text": "english",
+    "languages": ["en"],
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "complaint"),
+    [
+        (lambda a: a.update(text="french"), "text 'french'"),
+        (lambda a: a.update(revision=1234), "revision"),
+        (lambda a: a.update(vocab="vocab.yaml"), "vocab"),
+        (lambda a: a.update(separator=0), "separator"),
+        (lambda a: a.pop("separator"), "missing ['separator']"),  # null, not left out
+        (lambda a: a.update(languages=["da", False]), "languages"),
+    ],
+)
+def test_a_broken_aligner_names_the_problem(change, complaint):
+    entry = copy.deepcopy(_ALIGNER)
+    change(entry)
+    with pytest.raises(ValueError, match=complaint.replace("[", r"\[").replace("]", r"\]")):
+        validate_aligners({"my-aligner": entry})
+
+
+def test_a_language_has_one_aligner():
+    with pytest.raises(ValueError, match="'en' is already aligned by first"):
+        validate_aligners({"first": _ALIGNER, "second": _ALIGNER})
+    validate_aligners({})  # none: every word keeps the model's times
 
 
 def test_an_invalid_file_stops_startup_naming_the_file(tmp_path):

@@ -281,7 +281,10 @@ transcript = client.audio.transcriptions.create(
 The models above are defined in [`parakeet_service/models.yaml`](parakeet_service/models.yaml):
 per model its family, languages and chunk lengths, and per quantization a
 Hugging Face repo, a pinned commit and, where they differ from the fp32
-defaults, the files to load. To serve a
+defaults, the files to load. Its `aligners` section does the same for the
+[word aligners](#word-timestamps): per aligner its repo, pinned commit, files,
+CTC tokens, how transcripts are spelled for it, and the languages it aligns
+(`aligners: {}` turns alignment off). To serve a
 different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
 another file of the same shape. It **replaces** the built-in catalog, so copy
 the built-in file and edit it. The file is checked at startup and the service
@@ -324,7 +327,8 @@ words, then a character-level CTC model finds where each one starts and ends,
 WhisperX-style but on ONNX Runtime with no PyTorch:
 [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
 for English, [Omnilingual ASR CTC 300M](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx)
-for the rest. Parakeet's own word times sit on 80 ms frames and their ends are
+for the rest. Which aligner serves which language is set in the
+[model catalog](#your-own-model-catalog). Parakeet's own word times sit on 80 ms frames and their ends are
 estimated; aligned times sit on 20 ms frames and the ends come from the audio.
 
 It is opt-in: send the form field `align_words=true` (or `false` to opt out

@@ -200,11 +200,17 @@ def test_normalize_omnilingual_spells_as_its_training_text(word, spelled):
     assert aligner._normalize_omnilingual([word]) == [spelled]
 
 
-def test_every_parakeet_v3_language_is_aligned_by_a_known_model():
+def test_the_catalog_aligns_every_parakeet_v3_language():
     from parakeet_service.config import MODEL_CONFIGS
 
     assert set(MODEL_CONFIGS["parakeet-v3"]["languages"]) <= set(aligner.ALIGN_LANGUAGES)
-    assert {name for name, _normalize in aligner.ALIGN_LANGUAGES.values()} == set(aligner.ALIGN_MODELS)
+    assert aligner.ALIGN_LANGUAGES["en"] == "wav2vec2-base-960h"
+
+
+def test_every_text_the_catalog_may_name_is_spelled_here():
+    from parakeet_service.config import ALIGNER_TEXTS
+
+    assert set(aligner._TEXTS) == ALIGNER_TEXTS
 
 
 def test_tokens_txt_vocab_keeps_the_space_token(tmp_path):
@@ -231,7 +237,8 @@ def test_missing_language_uses_the_configured_default(monkeypatch):
 
 VOCAB = {"<pad>": 0, "|": 4, "'": 5, **{chr(ord("A") + i): 6 + i for i in range(26)}}
 VOCAB_SIZE = max(VOCAB.values()) + 1
-ENGLISH = aligner.ALIGN_MODELS["wav2vec2-base-960h"]
+# The shape of the catalog's wav2vec2-base-960h, as ChunkAligner reads it.
+ENGLISH = {"blank": "<pad>", "separator": "|", "text": "english"}
 
 
 def test_text_outside_the_model_alphabet_keeps_model_times(monkeypatch):
@@ -252,7 +259,7 @@ def test_text_outside_the_model_alphabet_keeps_model_times(monkeypatch):
 def _chunk_hearing(runs, frames):
     """A ChunkAligner whose audio is `runs` of (letter, frames)."""
     ids = [(VOCAB[token] if token != BLANK else BLANK, count) for token, count in runs]
-    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH)
     chunk._frames = (_emission(ids, frames, vocab_size=VOCAB_SIZE), _frame_starts(frames))
     return chunk
 
@@ -287,7 +294,7 @@ def test_scores_hear_only_their_window():
 
 
 def test_scores_fail_soft(monkeypatch):
-    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH)
     monkeypatch.setattr(chunk, "_emission", lambda: 1 / 0)
     assert chunk.scores(["one", "two"], 0.0, 1.0) == [float("-inf")] * 2
     assert chunk.best(["one", "two"], 0.0, 1.0) == 0
@@ -329,7 +336,7 @@ def test_star_penalty_decides_whether_unexplained_speech_is_cheap():
 
 
 def test_best_hears_the_whole_reading_under_the_choice_penalty():
-    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH)
     chunk._frames = (_ox_cat(), _frame_starts(12))
     assert chunk.best(["cat", "ox cat", "ox cap"], 0.0, 1.0) == 1
 
@@ -363,14 +370,14 @@ def _ask_everything(chunk):
 
 def test_the_audio_is_heard_once_per_chunk():
     session = _CountingSession()
-    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH)
     assert _ask_everything(chunk) is not None
     assert session.runs == 1
 
 
 def test_a_failed_pass_is_not_run_again(caplog):
     session = _CountingSession(fail=True)
-    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH)
     assert _ask_everything(chunk) is None
     assert chunk.scores(["one", "two"], 0.0, 3.0) == [float("-inf")] * 2
     assert chunk.best(["one", "two"], 0.0, 3.0) == 0

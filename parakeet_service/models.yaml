@@ -5,7 +5,8 @@
 # start on a mistake.
 #
 # `languages` holds shared lists as YAML anchors (&name), which entries reference
-# as *name; the service itself only reads `models`. Quote every language code:
+# as *name; the service itself only reads `models` and `aligners`. Quote every
+# language code:
 # a bare no (Norwegian) is YAML for false.
 #
 # One entry per model: what every precision of it shares (family, the
@@ -364,3 +365,50 @@ models:
         files:
           encoder_model.onnx: onnx/encoder_model_int8.onnx
           decoder_model_merged.onnx: onnx/decoder_model_merged_int8.onnx
+
+# Word aligners (#26, #32): character-level CTC models (wav2vec2 family, ONNX)
+# that time a transcript's words from the audio, for requests that ask for
+# aligned words or spoken numbers. Each takes raw 16 kHz audio normalised to
+# zero mean and unit variance and emits a frame per 20 ms; each downloads on the
+# first request that needs it and runs on CPU. `aligners: {}` turns alignment
+# off: every request keeps the model's own word times.
+#
+# Per aligner: the repo and pinned commit; `onnx`, the graph to run; `vocab`, a
+# vocab.json ({token: id}) or a sherpa-onnx tokens.txt ("token id" lines); its
+# CTC `blank` token and the `separator` token between words (null if it has
+# none), quoted, and stated rather than guessed: with the MMS blank set wrong,
+# words are still placed, but start 306 ms off instead of 37; `text`, how a
+# transcript is spelled for it (english: A-Z with numbers said in words, for
+# wav2vec2-base-960h; omnilingual: Omnilingual ASR's training-text
+# normalisation, lower case, numbers dropped); and the `languages` it aligns, a
+# request's `language` without its region ("fr-CA" is "fr"). A language belongs
+# to one aligner; one no aligner lists keeps the model's word times.
+aligners:
+  # Apache-2.0; 91 MB; ~2 s of CPU per 30 s of audio on 4 threads.
+  wav2vec2-base-960h:
+    repo: onnx-community/wav2vec2-base-960h-ONNX
+    revision: "729c1a6730fb549c20a1c73a3d3f96f11020225e"
+    onnx: onnx/model_int8.onnx
+    vocab: vocab.json
+    blank: "<pad>"
+    separator: "|"
+    text: english
+    languages: ["en"]
+  # Apache-2.0 (Meta's omniASR_CTC_300M_v2, exported by sherpa-onnx); ~1600
+  # languages, listed here for the rest of Parakeet v3's; 328 MB; ~4 s of CPU
+  # per 30 s of audio on 4 threads. Its vocab also has capitals, digits and
+  # punctuation, but its training text was normalised without them. Measured on
+  # word-by-word TTS in 21 of these languages (#32): 51 ms mean start error,
+  # 100 ms end (ends early, like English); et, lv and mt untested.
+  omnilingual-ctc-300m:
+    repo: OpenVoiceOS/omnilingual-asr-ctc-300m-onnx
+    revision: "bc55e1de19af8a907b0a010d06fc4637a2d5bf0c"
+    onnx: model.int8.onnx
+    vocab: tokens.txt
+    blank: "<s>"
+    separator: " "
+    text: omnilingual
+    languages: [
+      "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
+      "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk"
+    ]

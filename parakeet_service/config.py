@@ -187,26 +187,64 @@ def validate_catalog(models: Dict[str, Any]) -> None:
             loads[key] = quant
 
 
+# How aligner.py spells a transcript for an aligner (its `text`): "english" is
+# wav2vec2's A-Z with numbers said in words, "omnilingual" is Omnilingual ASR's
+# training-text normalisation.
+ALIGNER_TEXTS = {"english", "omnilingual"}
+_ALIGNER_KEYS = {"repo", "revision", "onnx", "vocab", "blank", "separator", "text", "languages"}
+
+
+def validate_aligners(aligners: Dict[str, Any]) -> None:
+    """Raise ValueError naming the first thing wrong with a catalog's aligners."""
+    if not isinstance(aligners, dict):
+        raise ValueError("`aligners` must map aligner names to entries ({} for none)")
+    aligned: Dict[str, str] = {}
+    for name, entry in aligners.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"{name}: an aligner must be a mapping")
+        if missing := _ALIGNER_KEYS - entry.keys():
+            raise ValueError(f"{name}: missing {sorted(missing)}")
+        if not all(isinstance(entry[key], str) for key in ("repo", "onnx", "blank")):
+            raise ValueError(f"{name}: repo, onnx and blank must be strings")
+        if not isinstance(entry["revision"], str) or not _REVISION.fullmatch(entry["revision"]):
+            raise ValueError(f"{name}: revision must be a quoted 40-character commit SHA")
+        if not isinstance(entry["vocab"], str) or not entry["vocab"].endswith((".json", ".txt")):
+            raise ValueError(f"{name}: vocab must be a vocab.json or a tokens.txt")
+        if entry["separator"] is not None and not isinstance(entry["separator"], str):
+            raise ValueError(f"{name}: separator must be a quoted token, or null for none")
+        if not isinstance(entry["text"], str) or entry["text"] not in ALIGNER_TEXTS:
+            raise ValueError(f"{name}: text {entry['text']!r} is not one of {sorted(ALIGNER_TEXTS)}")
+        languages = entry["languages"]
+        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
+            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
+        for code in languages:
+            if code in aligned:
+                raise ValueError(f"{name}: {code!r} is already aligned by {aligned[code]}")
+            aligned[code] = name
+
+
 def load_catalog(path: Path) -> Dict[str, Any]:
-    """Read and validate a catalog file; return its models."""
+    """Read and validate a catalog file; return its models and aligners."""
     with open(path, encoding="utf-8") as handle:
         catalog = yaml.safe_load(handle)
     try:
         if not isinstance(catalog, dict):
-            raise ValueError("expected a mapping with a `models` key")
+            raise ValueError("expected a mapping with `models` and `aligners` keys")
         validate_catalog(catalog.get("models"))
+        validate_aligners(catalog.get("aligners"))
     except ValueError as exc:
         raise RuntimeError(f"invalid model catalog {path}: {exc}") from None
-    models = catalog["models"]
     # Spell out every file here, so loading never has to know about defaults.
-    for entry in models.values():
+    for entry in catalog["models"].values():
         for variant in entry["quantizations"].values():
             variant["files"] = {**ONNX_ASR_DEFAULT_FILES[entry["onnx_asr_type"]], **variant.get("files", {})}
-    return models
+    return {"models": catalog["models"], "aligners": catalog["aligners"]}
 
 
 CATALOG_PATH = Path(os.getenv("PARAKEET_MODEL_CATALOG") or Path(__file__).with_name("models.yaml"))
-MODEL_CONFIGS = load_catalog(CATALOG_PATH)
+_CATALOG = load_catalog(CATALOG_PATH)
+MODEL_CONFIGS = _CATALOG["models"]
+ALIGNER_CONFIGS = _CATALOG["aligners"]
 
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
 
