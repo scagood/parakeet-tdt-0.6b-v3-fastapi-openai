@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import numpy as np
@@ -439,7 +440,7 @@ class _Download:
 
 def _fake_hub(monkeypatch, download):
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=download))
-    monkeypatch.setattr(aligner, "_loaded", {})
+    monkeypatch.setattr(aligner, "_loaded", OrderedDict())
     monkeypatch.setattr(aligner, "_failed_at", {})
 
 
@@ -458,6 +459,19 @@ def test_failed_load_is_retried_after_a_cooldown(monkeypatch, tmp_path):
     now[0] += aligner._RETRY_SEC
     assert aligner._load("wav2vec2-base-960h", "int8") == ("session", {"<pad>": 0})
     assert aligner.status()["wav2vec2-base-960h:int8"] == "loaded"
+
+
+def test_aligners_share_the_model_cache_cap(monkeypatch, tmp_path):
+    _fake_hub(monkeypatch, _Download(tmp_path, fail_times=0))
+    (tmp_path / "tokens.txt").write_text("<s> 0\n", encoding="utf-8")
+    monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: object(), raising=False)
+    monkeypatch.setattr(aligner, "_build_sess_options", lambda *a, **k: None)
+    monkeypatch.setattr(aligner, "MODEL_CACHE_SIZE", 1)
+    int8 = aligner._load("wav2vec2-base-960h", "int8")
+    assert aligner._load("wav2vec2-base-960h", "int8") is int8  # a hit keeps it
+    aligner._load("omnilingual-ctc-300m", "int8")
+    assert list(aligner._loaded) == ["omnilingual-ctc-300m:int8"]  # least recent evicted
+    assert aligner.status()["wav2vec2-base-960h:int8"] == "not loaded"
 
 
 def test_aligner_session_uses_its_own_threads_without_spinning(monkeypatch, tmp_path):

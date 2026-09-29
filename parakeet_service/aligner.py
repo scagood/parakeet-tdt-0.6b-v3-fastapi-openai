@@ -13,13 +13,14 @@ import string
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from typing import Any, Callable, Container, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
 
 from . import spoken
-from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, ALIGNER_CONFIGS, TARGET_SR, logger
+from .config import ALIGN_DEFAULT_LANGUAGE, ALIGN_THREADS, ALIGNER_CONFIGS, MODEL_CACHE_SIZE, TARGET_SR, logger
 from .model import _build_sess_options
 
 Span = tuple[float, float]
@@ -142,7 +143,7 @@ _NEG_INF = -1e30
 _RETRY_SEC = 300.0
 
 _lock = threading.Lock()
-_loaded: dict[str, tuple[Any, dict[str, int]]] = {}
+_loaded: "OrderedDict[str, tuple[Any, dict[str, int]]]" = OrderedDict()
 _failed_at: dict[str, float] = {}
 
 
@@ -181,6 +182,7 @@ def _load(name: str, quant: str) -> Optional[tuple[Any, dict[str, int]]]:
     key = f"{name}:{quant}"
     with _lock:
         if key in _loaded:
+            _loaded.move_to_end(key)
             return _loaded[key]
         failed = _failed_at.get(key)
         if failed is not None and time.monotonic() - failed < _RETRY_SEC:
@@ -211,9 +213,13 @@ def _load(name: str, quant: str) -> Optional[tuple[Any, dict[str, int]]]:
             )
             return None
         _failed_at.pop(key, None)
-        _loaded[key] = (session, vocab)
+        _loaded[key] = loaded = (session, vocab)
+        # The models' LRU cap (PARAKEET_MODEL_CACHE_SIZE), counted separately.
+        while MODEL_CACHE_SIZE and len(_loaded) > MODEL_CACHE_SIZE:
+            evicted, _ = _loaded.popitem(last=False)
+            logger.info("Evicted word aligner %s (cache size %d)", evicted, MODEL_CACHE_SIZE)
         logger.info("Loaded word aligner %s (%s)", key, variant["repo"])
-        return _loaded[key]
+        return loaded
 
 
 def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
