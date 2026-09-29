@@ -367,48 +367,71 @@ models:
           decoder_model_merged.onnx: onnx/decoder_model_merged_int8.onnx
 
 # Word aligners (#26, #32): character-level CTC models (wav2vec2 family, ONNX)
-# that time a transcript's words from the audio, for requests that ask for
-# aligned words or spoken numbers. Each takes raw 16 kHz audio normalised to
-# zero mean and unit variance and emits a frame per 20 ms; each downloads on the
-# first request that needs it and runs on CPU. `aligners: {}` turns alignment
-# off: every request keeps the model's own word times.
+# that time a transcript's words from the audio. A request names one
+# (`aligner`, and may pick `aligner_quantization`) to get aligned word times
+# or to have spoken numbers hear which reading was said; there is no default.
+# They all run the same way: raw 16 kHz audio normalised to zero mean and unit
+# variance in, a frame per 20 ms out, on CPU; each downloads on the first
+# request that names it. `aligners: {}` serves none.
 #
-# Per aligner: the repo and pinned commit; `onnx`, the graph to run; `vocab`, a
-# vocab.json ({token: id}) or a sherpa-onnx tokens.txt ("token id" lines); its
-# CTC `blank` token and the `separator` token between words (null if it has
-# none), quoted, and stated rather than guessed: with the MMS blank set wrong,
-# words are still placed, but start 306 ms off instead of 37; `text`, how a
-# transcript is spelled for it (english: A-Z with numbers said in words, for
-# wav2vec2-base-960h; omnilingual: Omnilingual ASR's training-text
-# normalisation, lower case, numbers dropped); and the `languages` it aligns, a
-# request's `language` without its region ("fr-CA" is "fr"). A language belongs
-# to one aligner; one no aligner lists keeps the model's word times.
+# One entry per aligner, as for models: what every precision shares and, per
+# quantization, the repo and the commit it is pinned to.
+# - `aligner_type`, the layout of the export, says which files are read and
+#   where they sit unless `files` says otherwise (ALIGNER_DEFAULT_FILES in
+#   config.py): transformers-js is onnx/model.onnx and a {token: id}
+#   vocab.json; sherpa-onnx is model.onnx and a tokens.txt of "token id" lines.
+# - `languages`: each language a request may use it for (a request's
+#   `language` without its region: "fr-CA" is "fr"), and the normaliser steps
+#   that spell a transcript for the model, in order:
+#     english  numbers, symbols and lone letters said in words ("$5" is "FIVE
+#              DOLLARS", "R&D" is "AR AND DEE"), accents folded, in capitals
+#     letters  any language: letters, apostrophes and hyphens only, as
+#              Omnilingual ASR's training text is (numbers keep the model's times)
+#     upper, lower  the case the model's vocab spells letters in
+# - `blank`, its CTC blank token, and `separator`, the token between words
+#   (null if it has none), quoted. Stated, never guessed: with the MMS blank set
+#   wrong, words are still placed, but start 306 ms off instead of 37.
+# - `default_quantization`: what a request that names no aligner_quantization gets.
+#
+# Measured on word-by-word TTS (#32): mean start / end error, English set
+# (882 words, 3 voices) unless noted. CPU is per 30 s of audio on 4 threads.
 aligners:
-  # Apache-2.0; 91 MB; ~2 s of CPU per 30 s of audio on 4 threads.
+  # Apache-2.0. int8: 91 MB; 57 / 131 ms; ~2 s CPU.
   wav2vec2-base-960h:
-    repo: onnx-community/wav2vec2-base-960h-ONNX
-    revision: "729c1a6730fb549c20a1c73a3d3f96f11020225e"
-    onnx: onnx/model_int8.onnx
-    vocab: vocab.json
+    aligner_type: transformers-js
+    languages: {"en": [english, upper]}
     blank: "<pad>"
     separator: "|"
-    text: english
-    languages: ["en"]
+    default_quantization: int8
+    quantizations:
+      int8:
+        repo: onnx-community/wav2vec2-base-960h-ONNX
+        revision: "729c1a6730fb549c20a1c73a3d3f96f11020225e"
+        files:
+          model.onnx: onnx/model_int8.onnx
   # Apache-2.0 (Meta's omniASR_CTC_300M_v2, exported by sherpa-onnx); ~1600
-  # languages, listed here for the rest of Parakeet v3's; 328 MB; ~4 s of CPU
-  # per 30 s of audio on 4 threads. Its vocab also has capitals, digits and
-  # punctuation, but its training text was normalised without them. Measured on
-  # word-by-word TTS in 21 of these languages (#32): 51 ms mean start error,
-  # 100 ms end (ends early, like English); et, lv and mt untested.
+  # languages, listed here for Parakeet v3's. Its vocab also has capitals,
+  # digits and punctuation, but its training text was normalised without them.
+  # int8: 328 MB; 51 / 100 ms over 21 of these languages (et, lv and mt
+  # untested); ~4 s CPU.
   omnilingual-ctc-300m:
-    repo: OpenVoiceOS/omnilingual-asr-ctc-300m-onnx
-    revision: "bc55e1de19af8a907b0a010d06fc4637a2d5bf0c"
-    onnx: model.int8.onnx
-    vocab: tokens.txt
+    aligner_type: sherpa-onnx
+    languages: {
+      "bg": [letters, lower], "hr": [letters, lower], "cs": [letters, lower],
+      "da": [letters, lower], "nl": [letters, lower], "et": [letters, lower],
+      "fi": [letters, lower], "fr": [letters, lower], "de": [letters, lower],
+      "el": [letters, lower], "hu": [letters, lower], "it": [letters, lower],
+      "lv": [letters, lower], "lt": [letters, lower], "mt": [letters, lower],
+      "pl": [letters, lower], "pt": [letters, lower], "ro": [letters, lower],
+      "ru": [letters, lower], "sk": [letters, lower], "sl": [letters, lower],
+      "es": [letters, lower], "sv": [letters, lower], "uk": [letters, lower]
+    }
     blank: "<s>"
     separator: " "
-    text: omnilingual
-    languages: [
-      "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
-      "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk"
-    ]
+    default_quantization: int8
+    quantizations:
+      int8:
+        repo: OpenVoiceOS/omnilingual-asr-ctc-300m-onnx
+        revision: "bc55e1de19af8a907b0a010d06fc4637a2d5bf0c"
+        files:
+          model.onnx: model.int8.onnx

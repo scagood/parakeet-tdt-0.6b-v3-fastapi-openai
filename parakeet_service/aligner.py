@@ -62,6 +62,13 @@ def _normalize_english(words: Sequence[str]) -> list[str]:
     return [_letters(text) for text in said]
 
 
+def _accent(part: str) -> str:
+    """The other name of a speaker-dependent letter name ("ZEE" -> "ZED"), in
+    the case `part` is in; any other part as it is."""
+    other = _ACCENTS.get(part.upper())
+    return part if other is None else other if part.isupper() else other.lower()
+
+
 def _mostly_unknown(words: Sequence[str], said: Sequence[str], known: Container[str]) -> bool:
     """Whether most of `words` that have letters have none in `known` once
     said (`said`, one text per word): Cyrillic, Greek, ... in a model of Latin
@@ -78,13 +85,14 @@ def other_alphabet(words: Sequence[str]) -> bool:
     return _mostly_unknown(words, [_letters(word) for word in words], string.ascii_uppercase)
 
 
-def _normalize_omnilingual(words: Sequence[str]) -> list[str]:
-    """Each of `words` spelled the way Omnilingual ASR's training transcripts
-    are (upstream's text_normalize, default config): NFKC, lower case,
-    apostrophes and hyphens kept, other punctuation a word break."""
+def _normalize_letters(words: Sequence[str]) -> list[str]:
+    """Each of `words` as its letters, in any language: spelled the way
+    Omnilingual ASR's training transcripts are (upstream's text_normalize,
+    default config), NFKC, apostrophes and hyphens kept, other punctuation a
+    word break."""
     said = []
     for word in words:
-        text = unicodedata.normalize("NFKC", word).translate(_APOSTROPHES).lower()
+        text = unicodedata.normalize("NFKC", word).translate(_APOSTROPHES)
         # ponytail: digits are dropped, not said: their audio goes to the star
         # between words and a number keeps its model times. Per-language number
         # words (num2words) if numbers need timing too.
@@ -96,15 +104,16 @@ def _normalize_omnilingual(words: Sequence[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Models: the catalog's `aligners` (models.yaml)
 # --------------------------------------------------------------------------- #
-# An aligner's `text` -> all of a chunk's words -> one spoken string per word
-# (the whole list, because a word's spoken form can depend on its neighbours:
-# "$5 million").
-_TEXTS: dict[str, Callable[[Sequence[str]], list[str]]] = {
+# The normaliser steps a catalog aligner lists per language
+# (config.ALIGN_NORMALISERS), run in order: all of a chunk's words -> one
+# spoken string per word (the whole list, because a word's spoken form can
+# depend on its neighbours: "$5 million").
+_NORMALISERS: dict[str, Callable[[Sequence[str]], list[str]]] = {
     "english": _normalize_english,
-    "omnilingual": _normalize_omnilingual,
+    "letters": _normalize_letters,
+    "upper": lambda said: [text.upper() for text in said],
+    "lower": lambda said: [text.lower() for text in said],
 }
-# Language -> the aligner that aligns it.
-ALIGN_LANGUAGES = {code: name for name, spec in ALIGNER_CONFIGS.items() for code in spec["languages"]}
 # Full names OpenAI clients may send instead of ISO 639-1 codes.
 _LANGUAGE_NAMES = {"english": "en"}
 
@@ -150,63 +159,65 @@ def language_code(language: Optional[str]) -> str:
     return _LANGUAGE_NAMES.get(code, code)
 
 
-def supports(language: Optional[str]) -> bool:
-    return language_code(language) in ALIGN_LANGUAGES
+def aligns(name: str, language: Optional[str]) -> bool:
+    """Whether aligner `name` (a catalog name) aligns a request's `language`."""
+    return language_code(language) in ALIGNER_CONFIGS[name]["languages"]
 
 
 def status() -> dict[str, str]:
-    """Per-model aligner state, for /health."""
-    return {
-        name: "loaded" if name in _loaded else "failed" if name in _failed_at else "not loaded"
-        for name in ALIGNER_CONFIGS
-    }
+    """Per-aligner, per-quantization state ("name:quant"), for /health."""
+    keys = [f"{name}:{quant}" for name, spec in ALIGNER_CONFIGS.items() for quant in spec["quantizations"]]
+    return {key: "loaded" if key in _loaded else "failed" if key in _failed_at else "not loaded" for key in keys}
 
 
-def _read_vocab(path: str) -> dict[str, int]:
-    """token -> id from a vocab.json, or from a tokens.txt of "token id" lines
-    (where the token may itself be a space)."""
-    with open(path, encoding="utf-8") as handle:
-        if path.endswith(".json"):
+def _read_vocab(files: dict[str, str]) -> dict[str, int]:
+    """token -> id from the fetched vocab file: a vocab.json ({token: id}), or a
+    tokens.txt of "token id" lines, where the token may itself be a space."""
+    if "vocab.json" in files:
+        with open(files["vocab.json"], encoding="utf-8") as handle:
             return json.load(handle)
+    with open(files["tokens.txt"], encoding="utf-8") as handle:
         lines = (line.rstrip("\n").rpartition(" ") for line in handle)
         return {token: int(index) for token, _, index in lines}
 
 
-def _load(name: str) -> Optional[tuple[Any, dict[str, int]]]:
+def _load(name: str, quant: str) -> Optional[tuple[Any, dict[str, int]]]:
+    key = f"{name}:{quant}"
     with _lock:
-        if name in _loaded:
-            return _loaded[name]
-        failed = _failed_at.get(name)
+        if key in _loaded:
+            return _loaded[key]
+        failed = _failed_at.get(key)
         if failed is not None and time.monotonic() - failed < _RETRY_SEC:
             return None
-        spec = ALIGNER_CONFIGS[name]
+        variant = ALIGNER_CONFIGS[name]["quantizations"][quant]
         try:
             from huggingface_hub import hf_hub_download
 
-            def fetch(filename: str) -> str:
-                return hf_hub_download(spec["repo"], filename, revision=spec["revision"])
-
+            files = {
+                file: hf_hub_download(variant["repo"], path, revision=variant["revision"])
+                for file, path in variant["files"].items()
+            }
             # ponytail: CPU only. On CUDA (an fp16 export) the pass would drop from
             # ~1.8 s per 30 s of audio to tens of ms; untested, so not wired (#32).
             session = ort.InferenceSession(
-                fetch(spec["onnx"]),
+                files["model.onnx"],
                 # Only word and spoken-number requests use it: no threads spinning between calls.
                 sess_options=_build_sess_options(ALIGN_THREADS, spinning=False),
                 providers=["CPUExecutionProvider"],
             )
-            vocab = _read_vocab(fetch(spec["vocab"]))
+            vocab = _read_vocab(files)
         except Exception:
-            _failed_at[name] = time.monotonic()
+            _failed_at[key] = time.monotonic()
             logger.exception(
                 "word aligner %s failed to load; keeping model word times, retrying in %.0fs",
-                name,
+                key,
                 _RETRY_SEC,
             )
             return None
-        _failed_at.pop(name, None)
-        _loaded[name] = (session, vocab)
-        logger.info("Loaded word aligner %s (%s)", name, spec["repo"])
-        return _loaded[name]
+        _failed_at.pop(key, None)
+        _loaded[key] = (session, vocab)
+        logger.info("Loaded word aligner %s (%s)", key, variant["repo"])
+        return _loaded[key]
 
 
 def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -363,14 +374,21 @@ class ChunkAligner:
     answered with "don't know" (None, or the first reading), never raised.
     """
 
-    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], spec: dict[str, Any]):
+    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], spec: dict[str, Any], language: str):
         self._wav = wav
         self._session = session
         self._vocab = vocab
-        self._normalize = _TEXTS[spec["text"]]
+        self._steps = [_NORMALISERS[step] for step in spec["languages"][language]]
         self._blank = vocab[spec["blank"]]
         self._separator = None if spec["separator"] is None else vocab[spec["separator"]]
         self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
+
+    def _normalize(self, words: Sequence[str]) -> list[str]:
+        """`words` through the language's normaliser steps, in order."""
+        said = list(words)
+        for step in self._steps:
+            said = step(said)
+        return said
 
     def _emission(self) -> tuple[np.ndarray, np.ndarray]:
         if self._frames is None:
@@ -422,7 +440,7 @@ class ChunkAligner:
         "zed"), heard between the words either side of it."""
         said = list(said)
         for index, text in enumerate(said):
-            other = " ".join(_ACCENTS.get(part, part) for part in text.split())
+            other = " ".join(_accent(part) for part in text.split())
             if other == text or timed[index] is None:
                 continue
             start = max((span[1] for span in timed[:index] if span), default=0.0)
@@ -464,13 +482,17 @@ class ChunkAligner:
         return int(np.argmax(self.scores(options, start, end)))
 
 
-def for_chunk(wav: np.ndarray, language: Optional[str] = None) -> Optional[ChunkAligner]:
-    """A ChunkAligner for `wav`, or None when no aligner serves `language`."""
-    if not supports(language):
+def for_chunk(
+    wav: np.ndarray, language: Optional[str] = None, name: Optional[str] = None, quantization: Optional[str] = None
+) -> Optional[ChunkAligner]:
+    """A ChunkAligner for `wav` from aligner `name` at `quantization` (else its
+    default_quantization), or None when the request named no aligner, it does
+    not align `language`, or it could not load."""
+    if name is None or not aligns(name, language):
         return None
-    name = ALIGN_LANGUAGES[language_code(language)]
-    loaded = _load(name)
+    spec = ALIGNER_CONFIGS[name]
+    loaded = _load(name, quantization or spec["default_quantization"])
     if loaded is None:
         return None
     session, vocab = loaded
-    return ChunkAligner(wav, session, vocab, ALIGNER_CONFIGS[name])
+    return ChunkAligner(wav, session, vocab, spec, language_code(language))

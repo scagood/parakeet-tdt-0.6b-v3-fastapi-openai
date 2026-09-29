@@ -40,13 +40,19 @@ def test_a_replacement_file_loads_with_anchors_and_quoted_codes(tmp_path):
         '    quantizations:\n      fp32:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
         '      fp16:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
         "        files:\n          encoder-model.onnx: encoder-model.fp16.onnx\n"
-        "aligners:\n  my-aligner:\n    repo: me/aligner\n    revision: \"" + "b" * 40 + '"\n'
-        '    onnx: model.onnx\n    vocab: tokens.txt\n    blank: "<s>"\n    separator: " "\n'
-        "    text: omnilingual\n    languages: *nordic\n"
+        "aligners:\n  my-aligner:\n    aligner_type: sherpa-onnx\n"
+        '    languages: {"da": [letters, lower], "no": [letters, lower]}\n'
+        '    blank: "<s>"\n    separator: " "\n    default_quantization: int8\n'
+        '    quantizations:\n      int8:\n        repo: me/aligner\n        revision: "' + "b" * 40 + '"\n'
+        "        files:\n          model.onnx: model.int8.onnx\n"
     )
     catalog = load_catalog(path)
     models = catalog["models"]
-    assert catalog["aligners"]["my-aligner"]["separator"] == " "
+    # As for models, an aligner's default files are spelled out on load.
+    assert catalog["aligners"]["my-aligner"]["quantizations"]["int8"]["files"] == {
+        "model.onnx": "model.int8.onnx",
+        "tokens.txt": "tokens.txt",
+    }
     assert list(models) == ["my-model"]
     assert models["my-model"]["languages"] == ["da", "no", "sv"]
     # Defaults are spelled out on load; `files` overrides only what it names.
@@ -93,26 +99,31 @@ def test_model_names_must_be_lowercase():
 
 
 _ALIGNER = {
-    "repo": "me/aligner",
-    "revision": "0" * 40,
-    "onnx": "model.onnx",
-    "vocab": "vocab.json",
+    "aligner_type": "transformers-js",
+    "languages": {"en": ["english", "upper"]},
     "blank": "<pad>",
     "separator": "|",
-    "text": "english",
-    "languages": ["en"],
+    "default_quantization": "int8",
+    "quantizations": {
+        "fp32": {"repo": "me/aligner", "revision": "0" * 40},
+        "int8": {"repo": "me/aligner", "revision": "0" * 40, "files": {"model.onnx": "onnx/model_int8.onnx"}},
+    },
 }
 
 
 @pytest.mark.parametrize(
     ("change", "complaint"),
     [
-        (lambda a: a.update(text="french"), "text 'french'"),
-        (lambda a: a.update(revision=1234), "revision"),
-        (lambda a: a.update(vocab="vocab.yaml"), "vocab"),
+        (lambda a: a.update(aligner_type="sherpa"), "aligner_type 'sherpa'"),
+        (lambda a: a["languages"].update(en=["english", "title"]), "normalisers must be a list"),
+        (lambda a: a["languages"].update(en="english"), "normalisers must be a list"),
+        (lambda a: a.update(languages=["en"]), "languages must map"),
         (lambda a: a.update(separator=0), "separator"),
         (lambda a: a.pop("separator"), "missing ['separator']"),  # null, not left out
-        (lambda a: a.update(languages=["da", False]), "languages"),
+        (lambda a: a.update(default_quantization="fp16"), "default_quantization"),
+        (lambda a: a["quantizations"]["int8"].update(revision=1234), "revision"),
+        (lambda a: a["quantizations"]["int8"]["files"].update({"tokens.txt": "tokens.txt"}), "not a file"),
+        (lambda a: a["quantizations"]["int8"].pop("files"), "same files as my-aligner:fp32"),
     ],
 )
 def test_a_broken_aligner_names_the_problem(change, complaint):
@@ -122,10 +133,11 @@ def test_a_broken_aligner_names_the_problem(change, complaint):
         validate_aligners({"my-aligner": entry})
 
 
-def test_a_language_has_one_aligner():
-    with pytest.raises(ValueError, match="'en' is already aligned by first"):
-        validate_aligners({"first": _ALIGNER, "second": _ALIGNER})
+def test_aligners_may_share_a_language_and_there_may_be_none():
+    validate_aligners({"first": copy.deepcopy(_ALIGNER), "second": copy.deepcopy(_ALIGNER)})
     validate_aligners({})  # none: every word keeps the model's times
+    with pytest.raises(ValueError, match="lowercase"):
+        validate_aligners({"My-Aligner": copy.deepcopy(_ALIGNER)})
 
 
 def test_an_invalid_file_stops_startup_naming_the_file(tmp_path):

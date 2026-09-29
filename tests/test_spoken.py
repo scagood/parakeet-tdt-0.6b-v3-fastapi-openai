@@ -7,6 +7,9 @@ import pytest
 
 from parakeet_service import number_parse, routes, spoken
 from parakeet_service.config import TARGET_SR
+
+# The aligner a request names (option C: there is no default).
+EAR = ("wav2vec2-base-960h", "int8")
 from tests.test_number_parse import _say as _long_form
 
 
@@ -366,8 +369,8 @@ def test_the_default_reading_checks_only_what_it_uses(monkeypatch):
     # no audio to choose (the aligner failed to load): two readings show there
     # was a choice, and the first is said
     checked.clear()
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
-    said = routes._stitch(_prepared(), [_result(" ".join(words))], speak=True)[0]
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: None)
+    said = routes._stitch(_prepared(), [_result(" ".join(words))], speak=True, aligner_choice=EAR)[0]
     assert said == f"Order {full.options[0]} shipped." and len(checked) == 3
 
 
@@ -519,15 +522,15 @@ def _result(text):
 
 
 def test_stitch_rewrites_text_segments_and_words_together(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
-    text, segments, words = routes._stitch(_prepared(), [_result("It cost $5 today.")], speak=True)
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: None)
+    text, segments, words = routes._stitch(_prepared(), [_result("It cost $5 today.")], speak=True, aligner_choice=EAR)
     assert text == segments[0]["segment"] == "It cost five dollars today."
     assert [w["word"] for w in words] == ["It", "cost", "five", "dollars", "today."]
 
 
 def test_stitch_leaves_text_alone_when_off_or_nothing_to_say():
     assert routes._stitch(_prepared(), [_result("It cost $5 today.")])[0] == "It cost $5 today."
-    assert routes._stitch(_prepared(), [_result("No numbers here.")], speak=True)[0] == "No numbers here."
+    assert routes._stitch(_prepared(), [_result("No numbers here.")], speak=True, aligner_choice=EAR)[0] == "No numbers here."
 
 
 class _Ear:
@@ -552,8 +555,8 @@ class _Ear:
 
 def test_aligner_times_the_spoken_words(monkeypatch):
     ear, made = _Ear(), []
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: made.append(ear) or ear)
-    routes._stitch(_prepared(), [_result("It cost $5 today.")], align=True, speak=True)
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: made.append(ear) or ear)
+    routes._stitch(_prepared(), [_result("It cost $5 today.")], align=True, speak=True, aligner_choice=EAR)
     assert ear.timed[-1] == ["It", "cost", "five", "dollars", "today."]
     assert len(made) == 1  # one aligner, so one wav2vec2 pass, hears and times the chunk
 
@@ -561,8 +564,8 @@ def test_aligner_times_the_spoken_words(monkeypatch):
 @pytest.mark.parametrize("said", ["two pounds and ten pence", "two quid ten"])  # the 2nd and 5th reading
 def test_the_audio_picks_the_reading_that_was_said(monkeypatch, said):
     ear = _Ear(said)
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
-    text = routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True)[0]
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
+    text = routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True, aligner_choice=EAR)[0]
     assert text == f"That'll be {said} please."
     # heard between its neighbours' edges: "be" ends at 1.5, "please." starts at 3.0
     assert set(ear.windows) == {(1.5, 3.0)}
@@ -570,8 +573,8 @@ def test_the_audio_picks_the_reading_that_was_said(monkeypatch, said):
 
 def test_a_phrase_is_heard_up_to_the_word_after_it(monkeypatch):
     ear = _Ear("million dollars")
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
-    text = routes._stitch(_prepared(), [_result("They raised $2 million last year.")], speak=True)[0]
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
+    text = routes._stitch(_prepared(), [_result("They raised $2 million last year.")], speak=True, aligner_choice=EAR)[0]
     assert text == "They raised two million dollars last year."
     # "raised" ends at 1.5; "$2 million" is words 2-3, so "last" starts at 4.0
     assert set(ear.windows) == {(1.5, 4.0)}
@@ -579,9 +582,9 @@ def test_a_phrase_is_heard_up_to_the_word_after_it(monkeypatch):
 
 def test_each_number_in_a_chunk_is_heard_in_its_own_slot(monkeypatch):
     ear = _Ear("and ten pence", "and fifty pence")
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
     written = "It opens at 6pm and costs £2.10 then £3.50 today."
-    assert routes._stitch(_prepared(), [_result(written)], speak=True)[0] == (
+    assert routes._stitch(_prepared(), [_result(written)], speak=True, aligner_choice=EAR)[0] == (
         "It opens at six pm and costs two pounds and ten pence then three pounds and fifty pence today."
     )
     # "6pm" (word 3) has nothing to decide; "£2.10" (6) sits between "costs"
@@ -592,12 +595,12 @@ def test_each_number_in_a_chunk_is_heard_in_its_own_slot(monkeypatch):
 def test_a_round_number_after_a_determiner_may_be_heard_bare(monkeypatch):
     ear = _MarginEar(0.0)
     ear.heard = {"hundred": 5.0, "hundredth": 5.0}
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
     for written, said in [
         ("She ran her 100 meters.", "She ran her hundred meters."),
         ("Our 100th customer arrived.", "Our hundredth customer arrived."),
     ]:
-        assert routes._stitch(_prepared(), [_result(written)], speak=True)[0] == said
+        assert routes._stitch(_prepared(), [_result(written)], speak=True, aligner_choice=EAR)[0] == said
 
 
 def test_each_zero_is_heard_on_its_own(monkeypatch):
@@ -612,8 +615,8 @@ def test_each_zero_is_heard_on_its_own(monkeypatch):
             return [float(sum(a == b for a, b in zip(option.split(), self.said))) for option in options]
 
     ear = ZeroEar()
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
-    text = routes._stitch(_prepared(), [_result("Call me on 07700900120.")], speak=True)[0]
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
+    text = routes._stitch(_prepared(), [_result("Call me on 07700900120.")], speak=True, aligner_choice=EAR)[0]
     assert text == "Call me on oh seven seven zero zero nine zero oh one two oh."  # "oh." too
     assert set(ear.windows) == {(2.5, float("inf"))}  # each zero heard in the number's own slot
 
@@ -629,21 +632,21 @@ class _DeafEar(_Ear):
 
 
 def test_the_first_reading_is_kept_when_the_audio_cannot_tell(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: _DeafEar())
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: _DeafEar())
     # "oh" stays: its zero is not swapped for "zero" by a tie
-    assert routes._stitch(_prepared(), [_result("Born in 1905 in Leeds.")], speak=True)[0] == (
+    assert routes._stitch(_prepared(), [_result("Born in 1905 in Leeds.")], speak=True, aligner_choice=EAR)[0] == (
         "Born in nineteen oh five in Leeds."
     )
 
 
 def test_without_audio_the_first_reading_is_used(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
-    assert routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True)[0] == (
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: None)
+    assert routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True, aligner_choice=EAR)[0] == (
         "That'll be two pounds ten please."
     )
 
 
-def _refuse(_wav, _language):
+def _refuse(*_):
     raise AssertionError("nothing to hear, no model")
 
 
@@ -657,17 +660,17 @@ def _refuse(_wav, _language):
 )
 def test_nothing_to_hear_never_loads_the_model(monkeypatch, written, said):
     monkeypatch.setattr(routes.aligner, "for_chunk", _refuse)
-    assert routes._stitch(_prepared(), [_result(written)], speak=True)[0] == said
-    assert not routes._needs_aligner([_result(written)], speak=True)
+    assert routes._stitch(_prepared(), [_result(written)], speak=True, aligner_choice=EAR)[0] == said
+    assert not routes._needs_aligner([_result(written)], speak=True, aligner_choice=EAR)
 
 
 def test_a_number_to_hear_needs_the_model(monkeypatch):
     monkeypatch.setattr(routes.aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     results = [_result("No numbers here."), _result("That'll be £2.10 please.")]
-    assert routes._needs_aligner(results, speak=True)
+    assert routes._needs_aligner(results, speak=True, aligner_choice=EAR)
     assert not routes._needs_aligner(results)  # spoken numbers off
-    assert not routes._needs_aligner(results, speak=True, language="ja")  # no aligner for it
-    assert routes._needs_aligner([_result("No numbers here.")], align=True)
+    assert not routes._needs_aligner(results, speak=True)  # no aligner named: first readings
+    assert routes._needs_aligner([_result("No numbers here.")], align=True, aligner_choice=EAR)
 
 
 @pytest.mark.parametrize(
@@ -678,13 +681,13 @@ def test_other_alphabets_are_left_as_written(monkeypatch, written):
     # Sent without `language`, so taken for English: the aligner's own rule
     # (aligner.other_alphabet) says the chunk isn't, so no number is said out.
     monkeypatch.setattr(routes.aligner, "for_chunk", _refuse)
-    assert routes._stitch(_prepared(), [_result(written)], speak=True)[0] == written
-    assert not routes._needs_aligner([_result(written)], speak=True)
+    assert routes._stitch(_prepared(), [_result(written)], speak=True, aligner_choice=EAR)[0] == written
+    assert not routes._needs_aligner([_result(written)], speak=True, aligner_choice=EAR)
 
 
 def test_one_foreign_word_in_english_still_says_its_numbers(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: None)
-    assert routes._stitch(_prepared(), [_result("It cost $5 in Москва.")], speak=True)[0] == (
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: None)
+    assert routes._stitch(_prepared(), [_result("It cost $5 in Москва.")], speak=True, aligner_choice=EAR)[0] == (
         "It cost five dollars in Москва."
     )
 
@@ -696,9 +699,9 @@ class _BrokenEar(_Ear):
 
 def test_a_failure_keeps_parakeets_text(monkeypatch, caplog):
     ear = _BrokenEar()
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
     results = [_result("That'll be £2.10 please.")]
-    text, segments, words = routes._stitch(_prepared(), results, align=True, speak=True)
+    text, segments, words = routes._stitch(_prepared(), results, align=True, speak=True, aligner_choice=EAR)
     assert text == segments[0]["segment"] == "That'll be £2.10 please."
     assert "spoken numbers failed" in caplog.text
     # and the words are still timed, as written
@@ -732,15 +735,15 @@ class _MarginEar(_Ear):
     ],
 )
 def test_a_misheard_number_is_corrected_only_by_a_clear_margin(monkeypatch, lead, own, text):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: _MarginEar(lead, own))
-    assert routes._stitch(_prepared(), [_result("It was £1.10.")], speak=True)[0] == text
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: _MarginEar(lead, own))
+    assert routes._stitch(_prepared(), [_result("It was £1.10.")], speak=True, aligner_choice=EAR)[0] == text
 
 
 def test_a_number_none_of_whose_readings_fit_is_not_corrected(monkeypatch):
     # no reading of Parakeet's number fits the window: that is no evidence against it
     ear = _MarginEar(5.0, own=float("-inf"), other=float("-inf"))
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
-    assert routes._stitch(_prepared(), [_result("It was £1.10.")], speak=True)[0] == "It was one pound ten."
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
+    assert routes._stitch(_prepared(), [_result("It was £1.10.")], speak=True, aligner_choice=EAR)[0] == "It was one pound ten."
 
 
 def test_a_number_with_one_reading_can_still_be_corrected(monkeypatch):
@@ -748,12 +751,19 @@ def test_a_number_with_one_reading_can_still_be_corrected(monkeypatch):
     monkeypatch.setattr(routes.aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     ear = _MarginEar(0.0)
     ear.heard = {"two percent": routes._CORRECTION_MARGIN + 1}
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: ear)
-    assert routes._needs_aligner([_result("It was 20% off.")], speak=True)
-    assert routes._stitch(_prepared(), [_result("It was 20% off.")], speak=True)[0] == "It was two percent off."
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: ear)
+    assert routes._needs_aligner([_result("It was 20% off.")], speak=True, aligner_choice=EAR)
+    assert routes._stitch(_prepared(), [_result("It was 20% off.")], speak=True, aligner_choice=EAR)[0] == "It was two percent off."
 
 
 def test_numbers_are_never_corrected_with_spoken_numbers_off(monkeypatch):
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda _wav, _language: _MarginEar(1000.0))
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda *_: _MarginEar(1000.0))
     assert routes._stitch(_prepared(), [_result("It was £1.10.")])[0] == "It was £1.10."
-    assert routes._stitch(_prepared(), [_result("It was £1.10.")], align=True)[0] == "It was £1.10."
+    assert routes._stitch(_prepared(), [_result("It was £1.10.")], align=True, aligner_choice=EAR)[0] == "It was £1.10."
+
+
+def test_without_an_aligner_spoken_numbers_use_the_first_reading(monkeypatch):
+    monkeypatch.setattr(routes.aligner, "for_chunk", _refuse)
+    assert routes._stitch(_prepared(), [_result("That'll be £2.10 please.")], speak=True)[0] == (
+        "That'll be two pounds ten please."
+    )

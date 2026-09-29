@@ -187,40 +187,71 @@ def validate_catalog(models: Dict[str, Any]) -> None:
             loads[key] = quant
 
 
-# How aligner.py spells a transcript for an aligner (its `text`): "english" is
-# wav2vec2's A-Z with numbers said in words, "omnilingual" is Omnilingual ASR's
-# training-text normalisation.
-ALIGNER_TEXTS = {"english", "omnilingual"}
-_ALIGNER_KEYS = {"repo", "revision", "onnx", "vocab", "blank", "separator", "text", "languages"}
+# What aligner.py reads for an aligner, by its `aligner_type` (the layout of the
+# export), and where each file sits in the repo unless a quantization's `files`
+# says otherwise: the fp32 layout, as ONNX_ASR_DEFAULT_FILES is for models.
+ALIGNER_DEFAULT_FILES = {
+    # transformers.js exports (onnx-community, Xenova): a {token: id} vocab.json
+    "transformers-js": {"model.onnx": "onnx/model.onnx", "vocab.json": "vocab.json"},
+    # sherpa-onnx exports: a tokens.txt of "token id" lines
+    "sherpa-onnx": {"model.onnx": "model.onnx", "tokens.txt": "tokens.txt"},
+}
+# The normaliser steps an aligner's `languages` may list (aligner.py writes them).
+ALIGN_NORMALISERS = {"english", "letters", "upper", "lower"}
+_ALIGNER_KEYS = {"aligner_type", "languages", "blank", "separator", "default_quantization", "quantizations"}
 
 
 def validate_aligners(aligners: Dict[str, Any]) -> None:
     """Raise ValueError naming the first thing wrong with a catalog's aligners."""
     if not isinstance(aligners, dict):
         raise ValueError("`aligners` must map aligner names to entries ({} for none)")
-    aligned: Dict[str, str] = {}
     for name, entry in aligners.items():
+        # Requests are matched lowercased, as model names are.
+        if not isinstance(name, str) or name != name.lower():
+            raise ValueError(f"{name!r}: aligner names must be lowercase strings")
         if not isinstance(entry, dict):
             raise ValueError(f"{name}: an aligner must be a mapping")
         if missing := _ALIGNER_KEYS - entry.keys():
             raise ValueError(f"{name}: missing {sorted(missing)}")
-        if not all(isinstance(entry[key], str) for key in ("repo", "onnx", "blank")):
-            raise ValueError(f"{name}: repo, onnx and blank must be strings")
-        if not isinstance(entry["revision"], str) or not _REVISION.fullmatch(entry["revision"]):
-            raise ValueError(f"{name}: revision must be a quoted 40-character commit SHA")
-        if not isinstance(entry["vocab"], str) or not entry["vocab"].endswith((".json", ".txt")):
-            raise ValueError(f"{name}: vocab must be a vocab.json or a tokens.txt")
+        aligner_type = entry["aligner_type"]
+        if not isinstance(aligner_type, str) or aligner_type not in ALIGNER_DEFAULT_FILES:
+            raise ValueError(
+                f"{name}: aligner_type {aligner_type!r} is not one of {sorted(ALIGNER_DEFAULT_FILES)}"
+            )
+        languages = entry["languages"]
+        if not isinstance(languages, dict) or not languages or not all(isinstance(x, str) for x in languages):
+            # A bare `no` (Norwegian) arrives as False: quote language codes.
+            raise ValueError(f"{name}: languages must map quoted codes to lists of normalisers")
+        for code, steps in languages.items():
+            if not isinstance(steps, list) or not steps or not all(step in ALIGN_NORMALISERS for step in steps):
+                raise ValueError(f"{name}: {code}: normalisers must be a list of {sorted(ALIGN_NORMALISERS)}")
+        if not isinstance(entry["blank"], str):
+            raise ValueError(f"{name}: blank must be a quoted token")
         if entry["separator"] is not None and not isinstance(entry["separator"], str):
             raise ValueError(f"{name}: separator must be a quoted token, or null for none")
-        if not isinstance(entry["text"], str) or entry["text"] not in ALIGNER_TEXTS:
-            raise ValueError(f"{name}: text {entry['text']!r} is not one of {sorted(ALIGNER_TEXTS)}")
-        languages = entry["languages"]
-        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
-            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
-        for code in languages:
-            if code in aligned:
-                raise ValueError(f"{name}: {code!r} is already aligned by {aligned[code]}")
-            aligned[code] = name
+        quantizations = entry["quantizations"]
+        if not isinstance(quantizations, dict) or entry["default_quantization"] not in quantizations:
+            raise ValueError(f"{name}: quantizations must include default_quantization")
+        defaults = ALIGNER_DEFAULT_FILES[aligner_type]
+        loads: Dict[tuple, str] = {}
+        for quant, variant in quantizations.items():
+            where = f"{name}:{quant}"
+            if not isinstance(quant, str) or quant != quant.lower():
+                raise ValueError(f"{where}: quantization names must be lowercase strings")
+            if not isinstance(variant, dict) or not isinstance(variant.get("repo"), str):
+                raise ValueError(f"{where}: needs a repo")
+            if not isinstance(variant.get("revision"), str) or not _REVISION.fullmatch(variant["revision"]):
+                raise ValueError(f"{where}: revision must be a quoted 40-character commit SHA")
+            files = variant.get("files", {})
+            if not isinstance(files, dict) or not all(isinstance(x, str) for x in (*files, *files.values())):
+                raise ValueError(f"{where}: files must map aligner file names to repo paths")
+            if extra := files.keys() - defaults.keys():
+                raise ValueError(f"{where}: {sorted(extra)} is not a file a {aligner_type} aligner reads")
+            # A quantization that forgot its `files` would quietly load another's.
+            key = (variant["repo"], variant["revision"], tuple(sorted({**defaults, **files}.items())))
+            if key in loads:
+                raise ValueError(f"{where}: loads the same files as {name}:{loads[key]}; name its own in `files`")
+            loads[key] = quant
 
 
 def load_catalog(path: Path) -> Dict[str, Any]:
@@ -238,6 +269,9 @@ def load_catalog(path: Path) -> Dict[str, Any]:
     for entry in catalog["models"].values():
         for variant in entry["quantizations"].values():
             variant["files"] = {**ONNX_ASR_DEFAULT_FILES[entry["onnx_asr_type"]], **variant.get("files", {})}
+    for entry in catalog["aligners"].values():
+        for variant in entry["quantizations"].values():
+            variant["files"] = {**ALIGNER_DEFAULT_FILES[entry["aligner_type"]], **variant.get("files", {})}
     return {"models": catalog["models"], "aligners": catalog["aligners"]}
 
 
@@ -298,11 +332,6 @@ WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
 # model cannot run one synthetic chunk would 500 every real request, and an
 # orchestrator restarts a crashed replica faster than it notices a sick one.
 WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.0)
-# Word timestamps can be re-timed by a wav2vec2 forced aligner (aligner.py). A
-# request opts in with `align_words=true`; this is the answer for requests that
-# don't say. Off by default: it costs ~2 s of CPU per 30 s of English audio
-# (~4 s in other languages), and not every client wants it. The aligner downloads on the first request that uses it.
-ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", False)
 # Language assumed for alignment (and spoken numbers) when a request sends no
 # `language`. Parakeet v3 is multilingual and nothing here detects the language,
 # so this is an operator's statement about their audio. Empty means only align
