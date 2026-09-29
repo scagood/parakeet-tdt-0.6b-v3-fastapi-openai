@@ -196,9 +196,11 @@ ALIGNER_DEFAULT_FILES = {
     # sherpa-onnx exports: a tokens.txt of "token id" lines
     "sherpa-onnx": {"model.onnx": "model.onnx", "tokens.txt": "tokens.txt"},
 }
-# The normaliser steps an aligner's `languages` may list (aligner.py writes them).
+# The steps an aligner's `normalisers` may list (aligner.py writes them).
 ALIGN_NORMALISERS = {"english", "letters", "upper", "lower"}
-_ALIGNER_KEYS = {"aligner_type", "languages", "blank", "separator", "default_quantization", "quantizations"}
+_ALIGNER_KEYS = {
+    "aligner_type", "languages", "normalisers", "blank", "separator", "default_quantization", "quantizations"
+}
 
 
 def validate_aligners(aligners: Dict[str, Any]) -> None:
@@ -218,13 +220,12 @@ def validate_aligners(aligners: Dict[str, Any]) -> None:
             raise ValueError(
                 f"{name}: aligner_type {aligner_type!r} is not one of {sorted(ALIGNER_DEFAULT_FILES)}"
             )
-        languages = entry["languages"]
-        if not isinstance(languages, dict) or not languages or not all(isinstance(x, str) for x in languages):
+        languages, steps = entry["languages"], entry["normalisers"]
+        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
             # A bare `no` (Norwegian) arrives as False: quote language codes.
-            raise ValueError(f"{name}: languages must map quoted codes to lists of normalisers")
-        for code, steps in languages.items():
-            if not isinstance(steps, list) or not steps or not all(step in ALIGN_NORMALISERS for step in steps):
-                raise ValueError(f"{name}: {code}: normalisers must be a list of {sorted(ALIGN_NORMALISERS)}")
+            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
+        if not isinstance(steps, list) or not steps or not all(step in ALIGN_NORMALISERS for step in steps):
+            raise ValueError(f"{name}: normalisers must be a list of {sorted(ALIGN_NORMALISERS)}")
         if not isinstance(entry["blank"], str):
             raise ValueError(f"{name}: blank must be a quoted token")
         if entry["separator"] is not None and not isinstance(entry["separator"], str):

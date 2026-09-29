@@ -104,7 +104,7 @@ def _normalize_letters(words: Sequence[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Models: the catalog's `aligners` (models.yaml)
 # --------------------------------------------------------------------------- #
-# The normaliser steps a catalog aligner lists per language
+# The steps a catalog aligner lists as its `normalisers`
 # (config.ALIGN_NORMALISERS), run in order: all of a chunk's words -> one
 # spoken string per word (the whole list, because a word's spoken form can
 # depend on its neighbours: "$5 million").
@@ -374,17 +374,17 @@ class ChunkAligner:
     answered with "don't know" (None, or the first reading), never raised.
     """
 
-    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], spec: dict[str, Any], language: str):
+    def __init__(self, wav: np.ndarray, session: Any, vocab: dict[str, int], spec: dict[str, Any]):
         self._wav = wav
         self._session = session
         self._vocab = vocab
-        self._steps = [_NORMALISERS[step] for step in spec["languages"][language]]
+        self._steps = [_NORMALISERS[step] for step in spec["normalisers"]]
         self._blank = vocab[spec["blank"]]
         self._separator = None if spec["separator"] is None else vocab[spec["separator"]]
         self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
 
     def _normalize(self, words: Sequence[str]) -> list[str]:
-        """`words` through the language's normaliser steps, in order."""
+        """`words` through the aligner's normaliser steps, in order."""
         said = list(words)
         for step in self._steps:
             said = step(said)
@@ -495,4 +495,4 @@ def for_chunk(
     if loaded is None:
         return None
     session, vocab = loaded
-    return ChunkAligner(wav, session, vocab, spec, language_code(language))
+    return ChunkAligner(wav, session, vocab, spec)

@@ -6,8 +6,7 @@
 #
 # `languages` holds shared lists as YAML anchors (&name), which entries reference
 # as *name; the service itself only reads `models` and `aligners`. Quote every
-# language code:
-# a bare no (Norwegian) is YAML for false.
+# language code: a bare no (Norwegian) is YAML for false.
 #
 # One entry per model: what every precision of it shares (family, the
 # onnx-asr model type that runs it, languages, chunk lengths) and, per
@@ -380,11 +379,11 @@ models:
 #   where they sit unless `files` says otherwise (ALIGNER_DEFAULT_FILES in
 #   config.py): transformers-js is onnx/model.onnx and a {token: id}
 #   vocab.json; sherpa-onnx is model.onnx and a tokens.txt of "token id" lines.
-# - `languages`: each language a request may use it for (a request's
-#   `language` without its region: "fr-CA" is "fr"), and the normaliser steps
-#   that spell a transcript for the model, in order:
-#     english  numbers, symbols and lone letters said in words ("$5" is "FIVE
-#              DOLLARS", "R&D" is "AR AND DEE"), accents folded, in capitals
+# - `languages`: the languages a request may use it for (a request's
+#   `language` without its region: "fr-CA" is "fr").
+# - `normalisers`: the steps that spell a transcript for the model, in order:
+#     english  English numbers, symbols and lone letters said in words ("$5" is
+#              "FIVE DOLLARS", "R&D" is "AR AND DEE"), accents folded, in capitals
 #     letters  any language: letters, apostrophes and hyphens only, as
 #              Omnilingual ASR's training text is (numbers keep the model's times)
 #     upper, lower  the case the model's vocab spells letters in
@@ -400,7 +399,8 @@ aligners:
   # Apache-2.0. int8: 91 MB; 57 / 131 ms; ~2 s CPU. fp32: 360 MB; 59 / 113 ms; ~2 s CPU.
   wav2vec2-base-960h:
     aligner_type: transformers-js
-    languages: {"en": [english, upper]}
+    languages: *english
+    normalisers: [english, upper]
     blank: "<pad>"
     separator: "|"
     default_quantization: int8
@@ -414,23 +414,15 @@ aligners:
         files:
           model.onnx: onnx/model_int8.onnx
   # Apache-2.0 (Meta's omniASR_CTC_300M_v2, exported by sherpa-onnx); ~1600
-  # languages, listed here for Parakeet v3's. Its vocab also has capitals,
+  # languages, listed here for Parakeet v3's, English included: its numbers are
+  # dropped in every language (see `letters`). Its vocab also has capitals,
   # digits and punctuation, but its training text was normalised without them.
   # int8: 328 MB; 45 / 117 ms, and 51 / 100 ms over 21 of its other languages
   # (et, lv and mt untested); ~3 s CPU. fp32: 1.3 GB; 45 / 116 ms; ~4 s CPU.
   omnilingual-ctc-300m:
     aligner_type: sherpa-onnx
-    languages: {
-      "en": [english, lower],
-      "bg": [letters, lower], "hr": [letters, lower], "cs": [letters, lower],
-      "da": [letters, lower], "nl": [letters, lower], "et": [letters, lower],
-      "fi": [letters, lower], "fr": [letters, lower], "de": [letters, lower],
-      "el": [letters, lower], "hu": [letters, lower], "it": [letters, lower],
-      "lv": [letters, lower], "lt": [letters, lower], "mt": [letters, lower],
-      "pl": [letters, lower], "pt": [letters, lower], "ro": [letters, lower],
-      "ru": [letters, lower], "sk": [letters, lower], "sl": [letters, lower],
-      "es": [letters, lower], "sv": [letters, lower], "uk": [letters, lower]
-    }
+    languages: *parakeet-v3
+    normalisers: [letters, lower]
     blank: "<s>"
     separator: " "
     default_quantization: int8
@@ -448,7 +440,8 @@ aligners:
   # fp32: 1.2 GB; 48 / 101 ms; ~4 s CPU.
   wav2vec2-large-xlsr-53-english:
     aligner_type: transformers-js
-    languages: {"en": [english, lower]}
+    languages: *english
+    normalisers: [english, lower]
     blank: "<pad>"
     separator: "|"
     default_quantization: int8
@@ -468,7 +461,8 @@ aligners:
   # fp32: 1.2 GB; 36 / 106 ms; ~4 s CPU.
   mms-300m-forced-aligner:
     aligner_type: transformers-js
-    languages: {"en": [english, lower]}
+    languages: *english
+    normalisers: [english, lower]
     blank: "<blank>"
     separator: null
     default_quantization: int8

@@ -283,9 +283,9 @@ per model its family, languages and chunk lengths, and per quantization a
 Hugging Face repo, a pinned commit and, where they differ from the fp32
 defaults, the files to load. Its `aligners` section lists the
 [word aligners](#word-timestamps) the same way: per aligner its export layout,
-CTC tokens, the languages it aligns (each with the steps that spell a
-transcript for it) and default quantization, and per quantization a repo, a
-pinned commit and the files that differ (`aligners: {}` serves none). To serve a
+the languages it aligns, the steps that spell a transcript for it, its CTC
+tokens and default quantization, and per quantization a repo, a pinned commit
+and the files that differ (`aligners: {}` serves none). To serve a
 different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
 another file of the same shape. It **replaces** the built-in catalog, so copy
 the built-in file and edit it. The file is checked at startup and the service
@@ -369,9 +369,11 @@ and the languages each aligns, is set in the
   `language`. Whisper has no word times of its own, so it returns words only
   when the request names an aligner, and a multilingual Whisper model only when
   the request also names the language.
-* **Numbers and symbols** are aligned as spoken in English (in other
-  languages a number keeps Parakeet's times, and the words around it are
-  aligned as usual): `42` as "forty two", `2026` as
+* **Numbers and symbols** are aligned as spoken by the English aligners
+  (`wav2vec2-base-960h`, `wav2vec2-large-xlsr-53-english`,
+  `mms-300m-forced-aligner`). `omnilingual-ctc-300m` drops numbers in every
+  language, English included: a number keeps Parakeet's times, and the words
+  around it are aligned as usual. As said in English: `42` as "forty two", `2026` as
   "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
   `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
   folded (`café`). A number is read together with the words that change how it

@@ -41,7 +41,7 @@ def test_a_replacement_file_loads_with_anchors_and_quoted_codes(tmp_path):
         '      fp16:\n        repo: me/model\n        revision: "' + "a" * 40 + '"\n'
         "        files:\n          encoder-model.onnx: encoder-model.fp16.onnx\n"
         "aligners:\n  my-aligner:\n    aligner_type: sherpa-onnx\n"
-        '    languages: {"da": [letters, lower], "no": [letters, lower]}\n'
+        "    languages: *nordic\n    normalisers: [letters, lower]\n"
         '    blank: "<s>"\n    separator: " "\n    default_quantization: int8\n'
         '    quantizations:\n      int8:\n        repo: me/aligner\n        revision: "' + "b" * 40 + '"\n'
         "        files:\n          model.onnx: model.int8.onnx\n"
@@ -100,7 +100,8 @@ def test_model_names_must_be_lowercase():
 
 _ALIGNER = {
     "aligner_type": "transformers-js",
-    "languages": {"en": ["english", "upper"]},
+    "languages": ["en"],
+    "normalisers": ["english", "upper"],
     "blank": "<pad>",
     "separator": "|",
     "default_quantization": "int8",
@@ -115,9 +116,10 @@ _ALIGNER = {
     ("change", "complaint"),
     [
         (lambda a: a.update(aligner_type="sherpa"), "aligner_type 'sherpa'"),
-        (lambda a: a["languages"].update(en=["english", "title"]), "normalisers must be a list"),
-        (lambda a: a["languages"].update(en="english"), "normalisers must be a list"),
-        (lambda a: a.update(languages=["en"]), "languages must map"),
+        (lambda a: a.update(normalisers=["english", "title"]), "normalisers must be a list"),
+        (lambda a: a.update(normalisers="english"), "normalisers must be a list"),
+        (lambda a: a.update(languages={"en": ["english"]}), "languages must be a non-empty list"),
+        (lambda a: a.update(languages=["da", False]), "languages"),  # a bare `no`
         (lambda a: a.update(separator=0), "separator"),
         (lambda a: a.pop("separator"), "missing ['separator']"),  # null, not left out
         (lambda a: a.update(default_quantization="fp16"), "default_quantization"),
