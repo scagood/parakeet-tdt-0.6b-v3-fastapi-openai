@@ -166,16 +166,16 @@ BASE = "wav2vec2-base-960h"
 
 @pytest.mark.asyncio
 async def test_word_request_is_aligned_on_the_align_pool(calls):
-    body = await _transcribe(language="en-US", aligner_name=BASE)
+    body = await _transcribe(language="en", aligner_name=BASE)
     assert [c["words"] for c in calls] == [WORDS]
-    assert calls[0]["language"] == "en-US"
+    assert calls[0]["language"] == "en"
     assert calls[0]["aligner"] == (BASE, "int8")  # its default_quantization
     assert calls[0]["thread"].startswith("align")  # not the audio pool, not the loop
     assert [(w["word"], w["start"], w["end"]) for w in body["words"]] == [
         ("hello", 0.1, 0.4),
         ("world", 1.6, 1.9),
     ]
-    assert body["language"] == "en-US"
+    assert body["language"] == "en"
     # the segment was widened to cover the re-timed last word
     assert body["segments"][0]["end"] >= body["words"][-1]["end"]
 
@@ -201,9 +201,27 @@ async def test_with_no_default_language_an_aligner_needs_language(calls, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["en-GB", "en_GB", "EN", "English", "de-DE"])
+async def test_language_is_a_bare_iso_code_on_every_request(calls, language):
+    for response_format in ("json", "verbose_json"):  # whether or not anything uses it
+        with pytest.raises(HTTPException) as caught:
+            await _transcribe(response_format=response_format, language=language)
+        assert caught.value.status_code == 400 and "ISO 639-1" in caught.value.detail
+
+
+@pytest.mark.asyncio
+async def test_the_aligners_language_is_checked_only_for_word_times(calls):
+    # json: the aligner would never run for French (spoken numbers are English)
+    body = await _transcribe(response_format="json", language="fr", aligner_name=BASE)
+    assert body["text"] == "hello world" and calls == []
+    with pytest.raises(HTTPException, match="does not align 'fr'"):
+        await _transcribe(language="fr", aligner_name=BASE)
+
+
+@pytest.mark.asyncio
 async def test_parakeet_v3_languages_are_aligned_in_their_own_language(calls):
-    body = await _transcribe(language="fr-FR", aligner_name="Omnilingual-CTC-300M")
-    assert [(c["language"], c["aligner"]) for c in calls] == [("fr-FR", ("omnilingual-ctc-300m", "int8"))]
+    body = await _transcribe(language="fr", aligner_name="Omnilingual-CTC-300M")
+    assert [(c["language"], c["aligner"]) for c in calls] == [("fr", ("omnilingual-ctc-300m", "int8"))]
     assert body["words"][1]["start"] == 1.6
 
 
@@ -310,10 +328,7 @@ async def test_the_request_says_numbers_or_not_else_the_server_default(
     [
         (None, "It cost five dollars today."),  # PARAKEET_ALIGN_DEFAULT_LANGUAGE
         ("en", "It cost five dollars today."),
-        ("en-GB", "It cost five dollars today."),
-        ("English", "It cost five dollars today."),
         ("fr", "It cost $5 today."),
-        ("de-DE", "It cost $5 today."),
     ],
 )
 async def test_spoken_numbers_are_english_only(calls, speak, language, text):
@@ -483,18 +498,25 @@ async def test_whisper_multilingual_without_language_returns_no_words(calls):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("why", ["no language", "the aligner failed to load", "nothing was placed"])
+@pytest.mark.parametrize("why", ["the aligner failed to load", "nothing was placed"])
 async def test_whisper_never_returns_placeholder_word_times(calls, monkeypatch, why):
     # Whisper has no word times: without the aligner's, it has no words at all.
-    if why == "no language":
-        monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
-    elif why == "the aligner failed to load":
+    if why == "the aligner failed to load":
         monkeypatch.setattr(aligner, "for_chunk", lambda *_: None)
     else:
         monkeypatch.setattr(aligner, "for_chunk", lambda *_: SimpleNamespace(spans=lambda _words: None))
     body = await _transcribe_whisper("whisper-base.en", text="hello big wide world")
-    assert body["words"] == []
+    assert body["words"] is None
     assert body["text"] == "hello big wide world"
+
+
+@pytest.mark.asyncio
+async def test_an_english_only_model_is_aligned_as_english(calls, monkeypatch):
+    # No `language` and no default: an .en model's words are English all the same.
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    body = await _transcribe_whisper("whisper-base.en", language=None)
+    assert [c["language"] for c in calls] == ["en"]
+    assert [(w["word"], w["start"]) for w in body["words"]] == [("hello", 0.1), ("world", 1.6)]
 
 
 @pytest.mark.asyncio

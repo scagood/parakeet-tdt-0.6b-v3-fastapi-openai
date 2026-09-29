@@ -8,7 +8,6 @@ Aligned times sit on 20 ms frames and the ends come from the audio.
 from __future__ import annotations
 
 import json
-import re
 import string
 import threading
 import time
@@ -111,8 +110,6 @@ _NORMALISERS: dict[str, Callable[[Sequence[str]], list[str]]] = {
     "upper": lambda said: [text.upper() for text in said],
     "lower": lambda said: [text.lower() for text in said],
 }
-# Full names OpenAI clients may send instead of ISO 639-1 codes.
-_LANGUAGE_NAMES = {"english": "en"}
 
 _STRIDE = 320  # wav2vec2's feature encoder emits one frame per 320 samples (20 ms)
 _MIN_SAMPLES = 400  # receptive field of that encoder; shorter input has no frames
@@ -148,12 +145,10 @@ _failed_at: dict[str, float] = {}
 
 
 def language_code(language: Optional[str]) -> str:
-    """ISO 639-1 code for a request's `language` ("en-US", "English" -> "en")."""
-    code = (language or "").strip().lower()
-    if code in ("", "auto"):
-        code = ALIGN_DEFAULT_LANGUAGE
-    code = re.split(r"[-_]", code, maxsplit=1)[0]
-    return _LANGUAGE_NAMES.get(code, code)
+    """A request's `language` (a bare ISO 639-1 code: routes refuses anything
+    else), or ALIGN_DEFAULT_LANGUAGE when it sends none or "auto"."""
+    code = (language or "").strip()
+    return ALIGN_DEFAULT_LANGUAGE if code in ("", "auto") else code
 
 
 def aligns(name: str, language: Optional[str]) -> bool:
@@ -174,7 +169,8 @@ def _read_vocab(files: dict[str, str]) -> dict[str, int]:
         with open(files["vocab.json"], encoding="utf-8") as handle:
             return json.load(handle)
     with open(files["tokens.txt"], encoding="utf-8") as handle:
-        lines = (line.rstrip("\n").rpartition(" ") for line in handle)
+        # Skip blank lines, but not a line whose token is a space ("  4").
+        lines = (line.rstrip("\n").rpartition(" ") for line in handle if line.rstrip("\n"))
         return {token: int(index) for token, _, index in lines}
 
 

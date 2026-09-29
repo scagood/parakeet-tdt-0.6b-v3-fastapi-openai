@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from parakeet_service import aligner, model
+from fastapi import HTTPException
+
+from parakeet_service import aligner, model, routes
 from parakeet_service.config import ORT_INTRA_THREADS, TARGET_SR
 
 BLANK, A, B, C, SEP = 0, 1, 2, 3, 4
@@ -220,12 +222,23 @@ def test_tokens_txt_vocab_keeps_the_space_token(tmp_path):
     assert aligner._read_vocab({"tokens.txt": str(path)}) == {"<s>": 0, "<pad>": 1, " ": 2, "é": 3}
 
 
-@pytest.mark.parametrize(
-    ("language", "code"),
-    [("en", "en"), ("EN", "en"), ("en-US", "en"), ("en_GB", "en"), ("English", "en"), ("fr", "fr")],
-)
-def test_language_codes(language, code):
+def test_tokens_txt_blank_lines_are_skipped(tmp_path):
+    path = tmp_path / "tokens.txt"
+    path.write_text("<s> 0\n\n  1\na 2\n\n", encoding="utf-8")
+    assert aligner._read_vocab({"tokens.txt": str(path)}) == {"<s>": 0, " ": 1, "a": 2}
+
+
+@pytest.mark.parametrize(("language", "code"), [("en", "en"), ("fr", "fr"), ("haw", "haw"), (" en ", "en")])
+def test_language_codes_are_bare_iso_codes(language, code):
     assert aligner.language_code(language) == code
+    routes._validate_language(language)
+
+
+@pytest.mark.parametrize("language", ["EN", "en-US", "en_GB", "English", "e"])
+def test_any_other_language_is_a_400(language):
+    with pytest.raises(HTTPException) as caught:
+        routes._validate_language(language)
+    assert caught.value.status_code == 400 and "ISO 639-1" in caught.value.detail
 
 
 def test_missing_language_uses_the_configured_default(monkeypatch):
@@ -233,8 +246,10 @@ def test_missing_language_uses_the_configured_default(monkeypatch):
     assert all(aligner.aligns("wav2vec2-base-960h", value) for value in (None, "", "  ", "auto"))
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
     assert not any(aligner.aligns("wav2vec2-base-960h", value) for value in (None, "", "auto"))
-    assert aligner.aligns("wav2vec2-base-960h", "en-US") and not aligner.aligns("wav2vec2-base-960h", "fr")
-    assert aligner.aligns("omnilingual-ctc-300m", "fr-FR") and not aligner.aligns("omnilingual-ctc-300m", "ja")
+    assert aligner.aligns("wav2vec2-base-960h", "en") and not aligner.aligns("wav2vec2-base-960h", "fr")
+    assert aligner.aligns("omnilingual-ctc-300m", "fr") and not aligner.aligns("omnilingual-ctc-300m", "ja")
+    with pytest.raises(HTTPException):  # a region is a 400 before any aligner is asked
+        routes._validate_language("en-US")
 
 
 def test_no_aligner_named_is_no_alignment(monkeypatch):

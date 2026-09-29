@@ -359,16 +359,19 @@ request's language, is a 400 naming what is available. Which aligners exist,
 and the languages each aligns, is set in the
 [model catalog](#your-own-model-catalog).
 
-* **Language.** `language` takes an ISO 639-1 code, with or without a region
-  (`en`, `en-US`, `fr`, `de_DE`; also `english`), and must be one the aligner
-  aligns. A request without `language` (or with `auto`) is aligned as
+* **Language.** `language` is a bare ISO 639-1 code (`en`, `fr`), or empty or
+  `auto` for the default; anything else (`en-US`, `EN`, `English`) is a 400 on
+  every request. For word timestamps it must be one the aligner aligns. A
+  request without `language` (or with `auto`) is aligned as
   `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it: nothing
-  detects the language. A chunk whose words are mostly in another alphabet
-  than the aligner's (Cyrillic, Greek, ...) keeps Parakeet's times, but other
-  Latin-script languages sent without `language` are aligned as English — send
-  `language`. Whisper has no word times of its own, so it returns words only
-  when the request names an aligner, and a multilingual Whisper model only when
-  the request also names the language.
+  detects the language. An English-only model's words (`parakeet-v2`,
+  `whisper-*.en`) are aligned as English whatever `language` says. A chunk
+  whose words are mostly in another alphabet than the aligner's (Cyrillic,
+  Greek, ...) keeps Parakeet's times, but other Latin-script languages sent
+  without `language` are aligned as English — send `language`. Whisper has no
+  word times of its own, so it returns words only when the request names an
+  aligner, and a multilingual Whisper model only when the request also names
+  the language; if any of its words can't be aligned, `words` is null.
 * **Numbers and symbols** are aligned as spoken by the English aligners
   (`wav2vec2-base-960h`, `wav2vec2-large-xlsr-53-english`,
   `mms-300m-forced-aligner`). `omnilingual-ctc-300m` drops numbers in every
@@ -405,7 +408,7 @@ quantization under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers; empty to use them only when `language` is sent |
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers: a bare ISO 639-1 code, or empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
 #### Spoken numbers

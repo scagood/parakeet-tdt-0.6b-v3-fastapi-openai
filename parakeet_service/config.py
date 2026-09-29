@@ -129,6 +129,9 @@ ONNX_ASR_DEFAULT_FILES = {
 MODEL_FAMILIES = {"parakeet", "whisper"}
 _KEYS = {"family", "onnx_asr_type", "languages", "chunk_target_sec", "chunk_max_sec", "quantizations"}
 _REVISION = re.compile(r"[0-9a-f]{40}")
+# A language as requests, the catalog's aligners and the default all name it:
+# a bare ISO 639-1 code ("en"), no region, no case, no full name.
+LANGUAGE_CODE = re.compile(r"[a-z]{2,3}")
 
 
 def validate_catalog(models: Dict[str, Any]) -> None:
@@ -220,7 +223,7 @@ def validate_aligners(aligners: Dict[str, Any]) -> None:
         # Requests match on a lowercase code without its region ("fr-CA" is "fr").
         # A bare `no` (Norwegian) arrives as False: quote language codes.
         if not isinstance(languages, list) or not languages or not all(
-            isinstance(x, str) and re.fullmatch(r"[a-z]{2,3}", x) for x in languages
+            isinstance(x, str) and LANGUAGE_CODE.fullmatch(x) for x in languages
         ):
             raise ValueError(f"{name}: languages must list quoted lowercase codes, without a region")
         if not isinstance(steps, list) or not steps or not all(
@@ -340,7 +343,12 @@ WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.
 # `language`. Parakeet v3 is multilingual and nothing here detects the language,
 # so this is an operator's statement about their audio. Empty means only align
 # (or say numbers) when the request names a language.
-ALIGN_DEFAULT_LANGUAGE = os.getenv("PARAKEET_ALIGN_DEFAULT_LANGUAGE", "en").strip().lower()
+ALIGN_DEFAULT_LANGUAGE = os.getenv("PARAKEET_ALIGN_DEFAULT_LANGUAGE", "en").strip()
+if ALIGN_DEFAULT_LANGUAGE and not LANGUAGE_CODE.fullmatch(ALIGN_DEFAULT_LANGUAGE):
+    raise RuntimeError(
+        f"PARAKEET_ALIGN_DEFAULT_LANGUAGE must be an ISO 639-1 code such as 'en', or empty; "
+        f"got {ALIGN_DEFAULT_LANGUAGE!r}"
+    )
 # Parakeet writes numbers the way it chooses, and not consistently: "twenty-five
 # pounds" may come back as "£25" or "25 lb", "five dollars" as "$5". On, English
 # transcripts say numbers, money and units in words instead (spoken.py), using
