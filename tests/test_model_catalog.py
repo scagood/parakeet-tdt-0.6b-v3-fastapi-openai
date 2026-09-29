@@ -118,8 +118,12 @@ _ALIGNER = {
         (lambda a: a.update(aligner_type="sherpa"), "aligner_type 'sherpa'"),
         (lambda a: a.update(normalisers=["english", "title"]), "normalisers must be a list"),
         (lambda a: a.update(normalisers="english"), "normalisers must be a list"),
-        (lambda a: a.update(languages={"en": ["english"]}), "languages must be a non-empty list"),
+        (lambda a: a.update(languages={"en": ["english"]}), "languages must list"),
         (lambda a: a.update(languages=["da", False]), "languages"),  # a bare `no`
+        (lambda a: a.update(languages=["pt-BR"]), "without a region"),  # never matches a request
+        (lambda a: a.update(languages=["EN"]), "lowercase"),
+        (lambda a: a.update(normalisers=[{"english": True}]), "normalisers must be a list"),
+        (lambda a: a.update(default_quantization=["int8"]), "default_quantization"),
         (lambda a: a.update(separator=0), "separator"),
         (lambda a: a.pop("separator"), "missing ['separator']"),  # null, not left out
         (lambda a: a.update(default_quantization="fp16"), "default_quantization"),

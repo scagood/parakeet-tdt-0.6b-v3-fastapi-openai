@@ -676,7 +676,8 @@ def _validate_aligner(
 ) -> Optional[Tuple[str, str]]:
     """The request's aligner as (name, quantization), or None if it names none:
     in the catalog, at one of its quantizations (else its
-    default_quantization), aligning the request's language."""
+    default_quantization), aligning the request's language if it has one
+    (none: nothing is aligned, as with PARAKEET_ALIGN_DEFAULT_LANGUAGE empty)."""
     if name is None:
         if quantization is not None:
             raise HTTPException(status_code=400, detail="aligner_quantization needs an aligner")
@@ -694,7 +695,7 @@ def _validate_aligner(
             status_code=400,
             detail=f"Aligner {normalized!r} has no {quant!r} quantization. Available: {list(spec['quantizations'])}",
         )
-    if not aligner.aligns(normalized, language):
+    if aligner.language_code(language) and not aligner.aligns(normalized, language):
         raise HTTPException(
             status_code=400,
             detail=f"Aligner {normalized!r} does not align {aligner.language_code(language)!r}; "
@@ -708,7 +709,7 @@ def _whisper_language_known(model_name: str, language: Optional[str]) -> bool:
     aligned: an English-only model, or an explicit `language` — never inferred
     from a multilingual model's auto-detection, which could be any language
     and would mis-time the audio."""
-    return MODEL_CONFIGS[model_name]["languages"] == ["en"] or bool((language or "").strip())
+    return MODEL_CONFIGS[model_name]["languages"] == ["en"] or (language or "").strip().lower() not in ("", "auto")
 
 
 def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:

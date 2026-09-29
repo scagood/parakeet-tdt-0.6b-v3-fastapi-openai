@@ -190,6 +190,17 @@ async def test_without_an_aligner_words_keep_model_times(calls, language):
 
 
 @pytest.mark.asyncio
+async def test_with_no_default_language_an_aligner_needs_language(calls, monkeypatch):
+    # PARAKEET_ALIGN_DEFAULT_LANGUAGE empty: align only when `language` is sent, never a 400
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    body = await _transcribe(language=None, aligner_name=BASE)
+    assert calls == [] and body["words"][1]["start"] == 0.8
+    assert await _batch("hello", aligner_name=BASE) == ["hello"]
+    await _transcribe(language="en", aligner_name=BASE)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_parakeet_v3_languages_are_aligned_in_their_own_language(calls):
     body = await _transcribe(language="fr-FR", aligner_name="Omnilingual-CTC-300M")
     assert [(c["language"], c["aligner"]) for c in calls] == [("fr-FR", ("omnilingual-ctc-300m", "int8"))]
@@ -467,6 +478,13 @@ async def test_whisper_in_a_language_no_aligner_has_returns_no_words(calls):
 async def test_whisper_multilingual_without_language_returns_no_words(calls):
     # Auto-detect could be any language; never align a multilingual model blindly.
     body = await _transcribe_whisper("whisper-base", language=None)
+    assert calls == []
+    assert body["words"] is None
+
+
+@pytest.mark.asyncio
+async def test_whisper_auto_language_is_not_a_known_language(calls):
+    body = await _transcribe_whisper("whisper-base", language="auto")
     assert calls == []
     assert body["words"] is None
 

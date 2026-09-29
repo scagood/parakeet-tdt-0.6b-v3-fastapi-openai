@@ -187,7 +187,8 @@ def _load(name: str, quant: str) -> Optional[tuple[Any, dict[str, int]]]:
         failed = _failed_at.get(key)
         if failed is not None and time.monotonic() - failed < _RETRY_SEC:
             return None
-        variant = ALIGNER_CONFIGS[name]["quantizations"][quant]
+        spec = ALIGNER_CONFIGS[name]
+        variant = spec["quantizations"][quant]
         try:
             from huggingface_hub import hf_hub_download
 
@@ -204,6 +205,9 @@ def _load(name: str, quant: str) -> Optional[tuple[Any, dict[str, int]]]:
                 providers=["CPUExecutionProvider"],
             )
             vocab = _read_vocab(files)
+            for token in (spec["blank"], spec["separator"]):
+                if token is not None and token not in vocab:
+                    raise KeyError(f"{token!r} is not in the vocab")
         except Exception:
             _failed_at[key] = time.monotonic()
             logger.exception(
@@ -239,7 +243,7 @@ def _emission(session: Any, wav: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         frame_starts = start + _STRIDE * np.arange(out.shape[0])
         keep = (frame_starts >= core_start) & (frame_starts < core_end)
         # Log-softmax per window in float32: a float64 copy is 300 MB at 10k tokens.
-        out = out[keep]
+        out = out[keep].astype(np.float32, copy=False)
         out -= out.max(axis=-1, keepdims=True)
         out -= np.log(np.exp(out).sum(axis=-1, keepdims=True))
         log_probs.append(out)
@@ -378,6 +382,7 @@ class ChunkAligner:
         self._session = session
         self._vocab = vocab
         self._steps = [_NORMALISERS[step] for step in spec["normalisers"]]
+        self._letter_names = "english" in spec["normalisers"]  # "zee" or "zed"
         self._blank = vocab[spec["blank"]]
         self._separator = None if spec["separator"] is None else vocab[spec["separator"]]
         self._frames: Optional[tuple[np.ndarray, np.ndarray]] = None
@@ -424,7 +429,7 @@ class ChunkAligner:
             timed = word_spans(
                 emission, frame_starts, spoken, len(words), blank=self._blank, separator=self._separator
             )
-            if timed and (accented := self._accented(said, timed)) != said:
+            if timed and self._letter_names and (accented := self._accented(said, timed)) != said:
                 timed = word_spans(
                     emission, frame_starts, self._spoken(accented), len(words),
                     blank=self._blank, separator=self._separator,

@@ -217,17 +217,23 @@ def validate_aligners(aligners: Dict[str, Any]) -> None:
                 f"{name}: aligner_type {aligner_type!r} is not one of {sorted(ALIGNER_DEFAULT_FILES)}"
             )
         languages, steps = entry["languages"], entry["normalisers"]
-        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
-            # A bare `no` (Norwegian) arrives as False: quote language codes.
-            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
-        if not isinstance(steps, list) or not steps or not all(step in ALIGN_NORMALISERS for step in steps):
+        # Requests match on a lowercase code without its region ("fr-CA" is "fr").
+        # A bare `no` (Norwegian) arrives as False: quote language codes.
+        if not isinstance(languages, list) or not languages or not all(
+            isinstance(x, str) and re.fullmatch(r"[a-z]{2,3}", x) for x in languages
+        ):
+            raise ValueError(f"{name}: languages must list quoted lowercase codes, without a region")
+        if not isinstance(steps, list) or not steps or not all(
+            isinstance(step, str) and step in ALIGN_NORMALISERS for step in steps
+        ):
             raise ValueError(f"{name}: normalisers must be a list of {sorted(ALIGN_NORMALISERS)}")
         if not isinstance(entry["blank"], str):
             raise ValueError(f"{name}: blank must be a quoted token")
         if entry["separator"] is not None and not isinstance(entry["separator"], str):
             raise ValueError(f"{name}: separator must be a quoted token, or null for none")
         quantizations = entry["quantizations"]
-        if not isinstance(quantizations, dict) or entry["default_quantization"] not in quantizations:
+        default = entry["default_quantization"]
+        if not isinstance(quantizations, dict) or not isinstance(default, str) or default not in quantizations:
             raise ValueError(f"{name}: quantizations must include default_quantization")
         defaults = ALIGNER_DEFAULT_FILES[aligner_type]
         loads: Dict[tuple, str] = {}

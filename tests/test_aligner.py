@@ -299,6 +299,17 @@ def test_a_lower_case_model_hears_letter_names_too():
     assert chunk.spans(["Z"])[0] is not None
 
 
+def test_letter_names_are_heard_only_for_english():
+    # Dutch "zee" is "sea": no "zed" to listen for without the english normaliser
+    vocab = {"<s>": 0, " ": 1, **{chr(ord("a") + i): 2 + i for i in range(26)}}
+    spec = {"blank": "<s>", "separator": " ", "normalisers": ["letters", "lower"]}
+    runs = [(BLANK, 2)] + [run for letter in "zee" for run in ((vocab[letter], 3), (BLANK, 1))]
+    chunk = aligner.ChunkAligner(None, None, vocab, spec)
+    chunk._frames = (_emission(runs, 14, vocab_size=len(vocab)), _frame_starts(14))
+    chunk._accented = lambda *_: pytest.fail("letter names are English")
+    assert chunk.spans(["zee"])[0] is not None
+
+
 def test_scores_hear_only_their_window():
     # "ten", a pause, then "pence": heard up to the pause "ten" was said; the
     # next word's audio would make it "ten pence".
@@ -428,7 +439,7 @@ class _Download:
     def __init__(self, tmp_path, fail_times):
         self.calls = 0
         self.fail_times = fail_times
-        (tmp_path / "vocab.json").write_text('{"<pad>": 0}')
+        (tmp_path / "vocab.json").write_text('{"<pad>": 0, "|": 1}')
         self.tmp_path = tmp_path
 
     def __call__(self, repo, filename, revision):
@@ -457,13 +468,13 @@ def test_failed_load_is_retried_after_a_cooldown(monkeypatch, tmp_path):
     assert aligner.status()["omnilingual-ctc-300m:int8"] == "not loaded"
     assert aligner._load("wav2vec2-base-960h", "int8") is None and download.calls == 1  # no retry storm
     now[0] += aligner._RETRY_SEC
-    assert aligner._load("wav2vec2-base-960h", "int8") == ("session", {"<pad>": 0})
+    assert aligner._load("wav2vec2-base-960h", "int8") == ("session", {"<pad>": 0, "|": 1})
     assert aligner.status()["wav2vec2-base-960h:int8"] == "loaded"
 
 
 def test_aligners_share_the_model_cache_cap(monkeypatch, tmp_path):
     _fake_hub(monkeypatch, _Download(tmp_path, fail_times=0))
-    (tmp_path / "tokens.txt").write_text("<s> 0\n", encoding="utf-8")
+    (tmp_path / "tokens.txt").write_text("<s> 0\n  1\n", encoding="utf-8")
     monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: object(), raising=False)
     monkeypatch.setattr(aligner, "_build_sess_options", lambda *a, **k: None)
     monkeypatch.setattr(aligner, "MODEL_CACHE_SIZE", 1)
@@ -472,6 +483,15 @@ def test_aligners_share_the_model_cache_cap(monkeypatch, tmp_path):
     aligner._load("omnilingual-ctc-300m", "int8")
     assert list(aligner._loaded) == ["omnilingual-ctc-300m:int8"]  # least recent evicted
     assert aligner.status()["wav2vec2-base-960h:int8"] == "not loaded"
+
+
+def test_a_vocab_without_the_catalogs_tokens_is_a_failed_load(monkeypatch, tmp_path):
+    _fake_hub(monkeypatch, _Download(tmp_path, fail_times=0))
+    (tmp_path / "vocab.json").write_text('{"<pad>": 0}')  # no "|"
+    monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: object(), raising=False)
+    monkeypatch.setattr(aligner, "_build_sess_options", lambda *a, **k: None)
+    assert aligner.for_chunk(np.zeros(16000), "en", "wav2vec2-base-960h") is None  # not a 500
+    assert aligner.status()["wav2vec2-base-960h:int8"] == "failed"
 
 
 def test_aligner_session_uses_its_own_threads_without_spinning(monkeypatch, tmp_path):
