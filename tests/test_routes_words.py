@@ -174,10 +174,17 @@ async def test_word_request_is_aligned_on_the_align_pool(calls):
 
 @pytest.mark.asyncio
 async def test_unsupported_language_keeps_model_times(calls):
-    body = await _transcribe(language="fr")
+    body = await _transcribe(language="ja")
     assert calls == []
     assert body["words"][0]["start"] == 0.0 and body["words"][1]["start"] == 0.8
-    assert body["language"] == "fr"
+    assert body["language"] == "ja"
+
+
+@pytest.mark.asyncio
+async def test_parakeet_v3_languages_are_aligned_in_their_own_language(calls):
+    body = await _transcribe(language="fr-FR")
+    assert [c["language"] for c in calls] == ["fr-FR"]
+    assert body["words"][1]["start"] == 1.6
 
 
 @pytest.mark.asyncio
@@ -227,9 +234,9 @@ def test_the_switches_are_optional_form_fields(handler, name):
 
 
 def test_health_reports_aligner_state(monkeypatch):
-    monkeypatch.setattr(aligner, "status", lambda: {"en": "failed"})
+    monkeypatch.setattr(aligner, "status", lambda: {"wav2vec2-base-960h": "failed"})
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ready=True)))
-    assert routes.health(request)["aligner"] == {"en": "failed"}
+    assert routes.health(request)["aligner"] == {"wav2vec2-base-960h": "failed"}
 
 
 # --------------------------------------------------------------------------- #
@@ -402,6 +409,20 @@ async def test_whisper_english_transcript_is_split_and_aligned(calls):
         ("hello", 0.1, 0.4),
         ("world", 1.6, 1.9),
     ]
+
+
+@pytest.mark.asyncio
+async def test_whisper_aligns_any_language_the_aligner_knows(calls):
+    body = await _transcribe_whisper("whisper-base", language="de")
+    assert [c["language"] for c in calls] == ["de"]
+    assert body["words"] is not None
+
+
+@pytest.mark.asyncio
+async def test_whisper_in_a_language_the_aligner_lacks_returns_no_words(calls):
+    body = await _transcribe_whisper("whisper-base", language="ja")
+    assert calls == []
+    assert body["words"] is None
 
 
 @pytest.mark.asyncio

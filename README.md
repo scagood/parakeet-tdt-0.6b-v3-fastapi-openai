@@ -318,10 +318,13 @@ when `timestamp_granularities[]=word` is sent.
 
 #### Word timestamps
 
-For English, word times can come from a forced aligner rather than from
-Parakeet. Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
-finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
-no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
+In English and the other 24 languages Parakeet v3 transcribes, word times can
+come from a forced aligner rather than from Parakeet. Parakeet decides the
+words, then a character-level CTC model finds where each one starts and ends,
+WhisperX-style but on ONNX Runtime with no PyTorch:
+[wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
+for English, [Omnilingual ASR CTC 300M](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx)
+for the rest. Parakeet's own word times sit on 80 ms frames and their ends are
 estimated; aligned times sit on 20 ms frames and the ends come from the audio.
 
 It is opt-in: send the form field `align_words=true` (or `false` to opt out
@@ -339,14 +342,21 @@ transcript = client.audio.transcriptions.create(
 )
 ```
 
-* **Language.** `language` accepts `en`, `en-US`, `en_GB` or `english`. A
-  request without `language` (or with `auto`) is aligned as
+* **Language.** `language` takes an ISO 639-1 code, with or without a region
+  (`en`, `en-US`, `fr`, `de_DE`; also `english`): `en`, `bg`, `cs`, `da`, `de`,
+  `el`, `es`, `et`, `fi`, `fr`, `hr`, `hu`, `it`, `lt`, `lv`, `mt`, `nl`, `pl`,
+  `pt`, `ro`, `ru`, `sk`, `sl`, `sv` and `uk` are aligned; other languages keep
+  Parakeet's times. A request without `language` (or with `auto`) is aligned as
   `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it: nothing
   detects the language. A chunk whose words are mostly in another alphabet
-  (Cyrillic, Greek, ...) keeps Parakeet's times, but Latin-script languages
-  sent without `language` are aligned as English — set the default empty if you
-  serve them. Other languages keep Parakeet's times.
-* **Numbers and symbols** are aligned as spoken: `42` as "forty two", `2026` as
+  (Cyrillic, Greek, ...) keeps Parakeet's times, but other Latin-script
+  languages sent without `language` are aligned as English — send `language`,
+  or set the default empty if you serve them. Whisper has no word times of its
+  own, so a multilingual Whisper model returns words only when the request
+  names an aligned language.
+* **Numbers and symbols** are aligned as spoken in English (in other
+  languages a number keeps Parakeet's times, and the words around it are
+  aligned as usual): `42` as "forty two", `2026` as
   "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
   `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
   folded (`café`). A number is read together with the words that change how it
@@ -368,15 +378,16 @@ transcript = client.audio.transcriptions.create(
 
 The aligner only runs when alignment is on and words are returned (and for
 [spoken numbers](#spoken-numbers)), one request at a time on its own thread
-pool so it never holds up other requests' audio decoding. It downloads (~95 MB)
-on the first such request and runs on CPU, adding roughly 2 s per 30 s of audio
-on a 4-core machine. If the download fails, word times fall back to Parakeet's
-and the load is retried every 5 minutes; `/health` reports the aligner's state
-under `aligner`.
+pool so it never holds up other requests' audio decoding. Each model downloads
+on the first request that needs it (~95 MB for English, ~330 MB for the rest)
+and runs on CPU, adding roughly 2 s per 30 s of audio on a 4-core machine for
+English and 4 s for the other languages. If a download fails, word times fall
+back to Parakeet's and the load is retried every 5 minutes; `/health` reports
+each model's state under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every English word request unless it sends `align_words=false` |
+| `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every word request in an aligned language unless it sends `align_words=false` |
 | `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers; empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 

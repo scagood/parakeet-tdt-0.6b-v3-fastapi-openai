@@ -262,8 +262,8 @@ WARMUP_SEC = _env_float("PARAKEET_WARMUP_SEC", 5.0, minimum=0.0)
 WARMUP_TIMEOUT_SEC = _env_float("PARAKEET_WARMUP_TIMEOUT_SEC", 120.0, minimum=1.0)
 # Word timestamps can be re-timed by a wav2vec2 forced aligner (aligner.py). A
 # request opts in with `align_words=true`; this is the answer for requests that
-# don't say. Off by default: it costs ~2 s of CPU per 30 s of audio, and not
-# every client wants it. The aligner downloads on the first request that uses it.
+# don't say. Off by default: it costs ~2 s of CPU per 30 s of English audio
+# (~4 s in other languages), and not every client wants it. The aligner downloads on the first request that uses it.
 ALIGN_WORDS = _env_bool("PARAKEET_ALIGN_WORDS", False)
 # Language assumed for alignment (and spoken numbers) when a request sends no
 # `language`. Parakeet v3 is multilingual and nothing here detects the language,

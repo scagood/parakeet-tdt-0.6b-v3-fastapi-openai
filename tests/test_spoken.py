@@ -666,7 +666,7 @@ def test_a_number_to_hear_needs_the_model(monkeypatch):
     results = [_result("No numbers here."), _result("That'll be £2.10 please.")]
     assert routes._needs_aligner(results, speak=True)
     assert not routes._needs_aligner(results)  # spoken numbers off
-    assert not routes._needs_aligner(results, speak=True, language="fr")  # no aligner for it
+    assert not routes._needs_aligner(results, speak=True, language="ja")  # no aligner for it
     assert routes._needs_aligner([_result("No numbers here.")], align=True)
 
 

@@ -182,6 +182,38 @@ def test_normalize_english_never_raises_on_absurd_numbers():
 
 
 @pytest.mark.parametrize(
+    ("word", "spelled"),
+    [
+        ("L’Été,", "l'été"),  # lower case, the apostrophe its plain form
+        ("été", "été"),  # NFKC composes: the vocab holds "é", not e + accent
+        ("peut-être", "peut-être"),  # hyphens and apostrophes are letters here
+        ("«Москва»", "москва"),
+        ("Straße.", "straße"),
+        ("fünf/sechs", "fünf sechs"),  # other punctuation breaks the word
+        ("25%", ""),  # numbers are not said
+        ("COVID-19", "covid"),
+        ("'Allo'", "allo"),  # quotes are not apostrophes
+        ("-", ""),
+    ],
+)
+def test_normalize_omnilingual_spells_as_its_training_text(word, spelled):
+    assert aligner._normalize_omnilingual([word]) == [spelled]
+
+
+def test_every_parakeet_v3_language_is_aligned_by_a_known_model():
+    from parakeet_service.config import MODEL_CONFIGS
+
+    assert set(MODEL_CONFIGS["parakeet-v3"]["languages"]) <= set(aligner.ALIGN_LANGUAGES)
+    assert {name for name, _normalize in aligner.ALIGN_LANGUAGES.values()} == set(aligner.ALIGN_MODELS)
+
+
+def test_tokens_txt_vocab_keeps_the_space_token(tmp_path):
+    path = tmp_path / "tokens.txt"
+    path.write_text("<s> 0\n<pad> 1\n  2\né 3\n", encoding="utf-8")
+    assert aligner._read_vocab(str(path)) == {"<s>": 0, "<pad>": 1, " ": 2, "é": 3}
+
+
+@pytest.mark.parametrize(
     ("language", "code"),
     [("en", "en"), ("EN", "en"), ("en-US", "en"), ("en_GB", "en"), ("English", "en"), ("fr", "fr")],
 )
@@ -194,15 +226,16 @@ def test_missing_language_uses_the_configured_default(monkeypatch):
     assert all(aligner.supports(value) for value in (None, "", "  ", "auto"))
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
     assert not any(aligner.supports(value) for value in (None, "", "auto"))
-    assert aligner.supports("en-US") and not aligner.supports("fr")
+    assert aligner.supports("en-US") and aligner.supports("fr") and not aligner.supports("ja")
 
 
 VOCAB = {"<pad>": 0, "|": 4, "'": 5, **{chr(ord("A") + i): 6 + i for i in range(26)}}
 VOCAB_SIZE = max(VOCAB.values()) + 1
+ENGLISH = aligner.ALIGN_MODELS["wav2vec2-base-960h"]
 
 
 def test_text_outside_the_model_alphabet_keeps_model_times(monkeypatch):
-    monkeypatch.setitem(aligner._loaded, "en", (object(), VOCAB))
+    monkeypatch.setitem(aligner._loaded, "wav2vec2-base-960h", (object(), VOCAB))
     ran = []
 
     def fake_emission(_session, _wav):
@@ -219,7 +252,7 @@ def test_text_outside_the_model_alphabet_keeps_model_times(monkeypatch):
 def _chunk_hearing(runs, frames):
     """A ChunkAligner whose audio is `runs` of (letter, frames)."""
     ids = [(VOCAB[token] if token != BLANK else BLANK, count) for token, count in runs]
-    chunk = aligner.ChunkAligner(None, None, VOCAB, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
     chunk._frames = (_emission(ids, frames, vocab_size=VOCAB_SIZE), _frame_starts(frames))
     return chunk
 
@@ -254,7 +287,7 @@ def test_scores_hear_only_their_window():
 
 
 def test_scores_fail_soft(monkeypatch):
-    chunk = aligner.ChunkAligner(None, None, VOCAB, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
     monkeypatch.setattr(chunk, "_emission", lambda: 1 / 0)
     assert chunk.scores(["one", "two"], 0.0, 1.0) == [float("-inf")] * 2
     assert chunk.best(["one", "two"], 0.0, 1.0) == 0
@@ -296,7 +329,7 @@ def test_star_penalty_decides_whether_unexplained_speech_is_cheap():
 
 
 def test_best_hears_the_whole_reading_under_the_choice_penalty():
-    chunk = aligner.ChunkAligner(None, None, VOCAB, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(None, None, VOCAB, ENGLISH, aligner._normalize_english)
     chunk._frames = (_ox_cat(), _frame_starts(12))
     assert chunk.best(["cat", "ox cat", "ox cap"], 0.0, 1.0) == 1
 
@@ -330,14 +363,14 @@ def _ask_everything(chunk):
 
 def test_the_audio_is_heard_once_per_chunk():
     session = _CountingSession()
-    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH, aligner._normalize_english)
     assert _ask_everything(chunk) is not None
     assert session.runs == 1
 
 
 def test_a_failed_pass_is_not_run_again(caplog):
     session = _CountingSession(fail=True)
-    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, aligner._normalize_english)
+    chunk = aligner.ChunkAligner(np.zeros(3 * TARGET_SR, np.float32), session, VOCAB, ENGLISH, aligner._normalize_english)
     assert _ask_everything(chunk) is None
     assert chunk.scores(["one", "two"], 0.0, 3.0) == [float("-inf")] * 2
     assert chunk.best(["one", "two"], 0.0, 3.0) == 0
@@ -353,7 +386,7 @@ def test_spoken_numbers_share_the_aligners_other_alphabet_rule():
 
 
 def test_one_foreign_word_in_english_is_still_aligned(monkeypatch):
-    monkeypatch.setitem(aligner._loaded, "en", (object(), VOCAB))
+    monkeypatch.setitem(aligner._loaded, "wav2vec2-base-960h", (object(), VOCAB))
     seen = []
 
     def fake_emission(_session, _wav):
@@ -393,12 +426,12 @@ def test_failed_load_is_retried_after_a_cooldown(monkeypatch, tmp_path):
     now = [1000.0]
     monkeypatch.setattr(aligner.time, "monotonic", lambda: now[0])
 
-    assert aligner._load("en") is None
-    assert aligner.status() == {"en": "failed"}
-    assert aligner._load("en") is None and download.calls == 1  # no retry storm
+    assert aligner._load("wav2vec2-base-960h") is None
+    assert aligner.status() == {"wav2vec2-base-960h": "failed", "omnilingual-ctc-300m": "not loaded"}
+    assert aligner._load("wav2vec2-base-960h") is None and download.calls == 1  # no retry storm
     now[0] += aligner._RETRY_SEC
-    assert aligner._load("en") == ("session", {"<pad>": 0})
-    assert aligner.status() == {"en": "loaded"}
+    assert aligner._load("wav2vec2-base-960h") == ("session", {"<pad>": 0})
+    assert aligner.status()["wav2vec2-base-960h"] == "loaded"
 
 
 def test_aligner_session_uses_its_own_threads_without_spinning(monkeypatch, tmp_path):
@@ -406,7 +439,7 @@ def test_aligner_session_uses_its_own_threads_without_spinning(monkeypatch, tmp_
     built = []
     monkeypatch.setattr(aligner, "_build_sess_options", lambda *a, **k: built.append((a, k)))
     monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: "session", raising=False)
-    aligner._load("en")
+    aligner._load("wav2vec2-base-960h")
     assert built == [((aligner.ALIGN_THREADS,), {"spinning": False})]
 
 

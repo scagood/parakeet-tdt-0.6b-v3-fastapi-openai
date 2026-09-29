@@ -636,16 +636,16 @@ def healthz(request: Request):
     return {"status": "ok"}
 
 
-def _whisper_english(model_name: str, language: Optional[str]) -> bool:
-    """Whether a Whisper request may use the (English-only) aligner for word
-    times. Whisper has no native word timing, so we require English to be
-    *known* — an English-only model, or an explicit English `language` —
-    never inferred from a multilingual model's auto-detection, which could be
-    any language and would mis-time the audio."""
+def _whisper_aligns(model_name: str, language: Optional[str]) -> bool:
+    """Whether a Whisper request's words can be timed by the aligner. Whisper
+    has no native word timing, so the language must be *known* and aligned —
+    an English-only model, or an explicit `language` — never inferred from a
+    multilingual model's auto-detection, which could be any language and
+    would mis-time the audio."""
     if MODEL_CONFIGS[model_name]["languages"] == ["en"]:
         return True
     lang = (language or "").strip()
-    return bool(lang) and aligner.language_code(lang) == "en"
+    return bool(lang) and aligner.supports(lang)
 
 
 def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
@@ -687,11 +687,11 @@ async def transcribe(
     speak = _speaks(spoken_numbers, language)
     # Word timestamps: Parakeet emits them from its TDT tokens. Whisper returns
     # text only, so its words come purely from forced-aligning the transcript,
-    # and only when the language is known English (the aligner is English-only) —
-    # never guessed for a multilingual Whisper request.
+    # and only when its language is known and aligned — never guessed for a
+    # multilingual Whisper request.
     want_words = output_format == "verbose_json" and "word" in granularities and (
         family == "parakeet"
-        or (family == "whisper" and align and _whisper_english(model_name, language))
+        or (family == "whisper" and align and _whisper_aligns(model_name, language))
     )
     raw = await _read_upload_limited(file)
 
