@@ -483,6 +483,21 @@ async def test_whisper_multilingual_without_language_returns_no_words(calls):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("why", ["no language", "the aligner failed to load", "nothing was placed"])
+async def test_whisper_never_returns_placeholder_word_times(calls, monkeypatch, why):
+    # Whisper has no word times: without the aligner's, it has no words at all.
+    if why == "no language":
+        monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    elif why == "the aligner failed to load":
+        monkeypatch.setattr(aligner, "for_chunk", lambda *_: None)
+    else:
+        monkeypatch.setattr(aligner, "for_chunk", lambda *_: SimpleNamespace(spans=lambda _words: None))
+    body = await _transcribe_whisper("whisper-base.en", text="hello big wide world")
+    assert body["words"] == []
+    assert body["text"] == "hello big wide world"
+
+
+@pytest.mark.asyncio
 async def test_whisper_auto_language_is_not_a_known_language(calls):
     body = await _transcribe_whisper("whisper-base", language="auto")
     assert calls == []

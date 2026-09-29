@@ -512,17 +512,19 @@ def _stitch(
 
         # A text-only result (Whisper) has no tokens, so no word spans exist to
         # align. When alignment will run, split the transcript into words with
-        # placeholder spans for the aligner to re-time from the audio.
-        if align and not chunk_words and info["text"]:
+        # placeholder spans for the aligner to re-time from the audio; they are
+        # kept only if it does, never returned as word times of their own.
+        placeholders = align and not chunk_words and bool(info["text"])
+        if placeholders:
             chunk_words = _spread(info["text"].split(), chunk_start, chunk_end)
 
+        spans = None
         if align and chunk_words and (timer := chunk()) is not None:
-            _apply_alignment(
-                chunk_words,
-                timer.spans([w["word"] for w in chunk_words]),
-                chunk_start,
-                chunk_end,
-            )
+            spans = timer.spans([w["word"] for w in chunk_words])
+        if placeholders and not any(spans or ()):
+            chunk_words = []  # no aligner, no language, or nothing placed
+        elif spans:
+            _apply_alignment(chunk_words, spans, chunk_start, chunk_end)
             # Segment bounds came from the model's estimates; keep them covering
             # the re-timed words so a cue never ends before its last word.
             segment = segments[-1]
