@@ -6,6 +6,8 @@ uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 silero-vad>=6.0.0
 psutil>=5.0.0
+# Reads the model catalog (parakeet_service/models.yaml or PARAKEET_MODEL_CATALOG).
+pyyaml>=6.0
 requests>=2.0.0
 onnxruntime-gpu[cuda,cudnn]==1.30.0
 numpy<3

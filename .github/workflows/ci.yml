@@ -24,7 +24,8 @@ jobs:
         # numpy unpinned here: requirements.txt caps it at <3, so pip resolves
         # the same 2.x series the runtime installs.
         # fastapi + python-multipart: tests import parakeet_service.routes.
-        run: python -m pip install --upgrade pip numpy pytest pytest-asyncio psutil fastapi python-multipart
+        # pyyaml: config.py reads the model catalog (models.yaml) at import.
+        run: python -m pip install --upgrade pip numpy pytest pytest-asyncio psutil fastapi python-multipart pyyaml
       - name: Install ffmpeg
         # The service decodes everything that is not already a 16 kHz PCM WAV
         # through ffmpeg, so tests/test_audio.py cannot cover that path

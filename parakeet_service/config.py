@@ -8,9 +8,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
+
+import yaml
 
 
 # Set numeric-library limits before importing NumPy/ONNX Runtime in other modules.
@@ -96,184 +99,114 @@ if HF_OFFLINE:
     # base image that exports HF_HUB_OFFLINE=0.
     os.environ["HF_HUB_OFFLINE"] = "1"
 
-# parakeet-tdt-0.6b-v3 language coverage; v2 is English-only.
-_V3_LANGUAGES = [
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
-    "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv",
-    "uk",
-]
-# Whisper's 99 languages (multilingual exports); the .en exports are English-only.
-_WHISPER_LANGUAGES = [
-    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca",
-    "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
-    "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la",
-    "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
-    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
-    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be",
-    "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn",
-    "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha",
-    "ba", "jw", "su",
-]
+# The model catalog: every model the service serves, and how to load each
+# precision of it. The entries are data, in models.yaml next to this file, or in
+# the YAML file PARAKEET_MODEL_CATALOG names (a k8s ConfigMap, say), which then
+# replaces the built-in catalog wholesale. Either way it is validated here, so a
+# broken catalog stops the service at startup rather than at a request.
 
-# One entry per model: what every precision of it shares (family, languages,
-# chunk lengths) and, per quantization, the repo and onnx_asr quantization to
-# load (https://github.com/istupakov/onnx-asr). A request names the model and
-# may pick a quantization; without one it gets fp32, the reference precision,
-# whatever the hardware. FP16 halves VRAM (identical output measured on
-# Parakeet v3) but ONNX Runtime upcasts it on CPU, which is slower; int8
-# measurably drops words after silences.
-#
-# Whisper repos are onnx-community's except where its export is broken (#35):
-# the bare medium and large-v3 repos are empty (the exports live under -ONNX),
-# there is no medium.en, and the .en fp16 merged decoders fail onnxruntime's
-# graph check. Those come from Xenova, whose 8-bit files are _quantized (it has
-# no int8 encoder). The Whisper encoder sees a fixed 30 s window and the export
-# silently drops audio past it, so a longer chunk would lose its tail. Whisper
-# returns text only; word times come from forced alignment of the transcript
-# (#26).
-MODEL_CONFIGS = {
-    "parakeet-v3": {
-        "family": "parakeet",
-        "languages": _V3_LANGUAGES,
-        "chunk_target_sec": 60.0,
-        "chunk_max_sec": 75.0,
-        "quantizations": {
-            "fp32": ("istupakov/parakeet-tdt-0.6b-v3-onnx", None),
-            "fp16": ("grikdotnet/parakeet-tdt-0.6b-fp16", "fp16"),
-            "int8": ("istupakov/parakeet-tdt-0.6b-v3-onnx", "int8"),
-        },
+# What onnx-asr reads from a model folder, by the model type that runs it, and
+# where each file sits in the repo unless an entry's "files" says otherwise: the
+# fp32 layout of that type's usual exports (istupakov's for Parakeet,
+# onnx-community's for Whisper). Other precisions name their own files.
+ONNX_ASR_DEFAULT_FILES = {
+    "nemo-conformer-tdt": {
+        "encoder-model.onnx": "encoder-model.onnx",
+        "decoder_joint-model.onnx": "decoder_joint-model.onnx",
+        "vocab.txt": "vocab.txt",
+        "config.json": "config.json",
     },
-    "parakeet-v2": {
-        "family": "parakeet",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("istupakov/parakeet-tdt-0.6b-v2-onnx", None),
-            "fp16": ("ysdede/parakeet-tdt-0.6b-v2-onnx", "fp16"),
-            "int8": ("istupakov/parakeet-tdt-0.6b-v2-onnx", "int8"),
-        },
-    },
-    "whisper-tiny": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-tiny", None),
-            "fp16": ("onnx-community/whisper-tiny", "fp16"),
-            "int8": ("onnx-community/whisper-tiny", "int8"),
-        },
-    },
-    "whisper-tiny.en": {
-        "family": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-tiny.en", None),
-            "fp16": ("Xenova/whisper-tiny.en", "fp16"),
-            "int8": ("onnx-community/whisper-tiny.en", "int8"),
-        },
-    },
-    "whisper-base": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-base", None),
-            "fp16": ("onnx-community/whisper-base", "fp16"),
-            "int8": ("onnx-community/whisper-base", "int8"),
-        },
-    },
-    "whisper-base.en": {
-        "family": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-base.en", None),
-            "fp16": ("Xenova/whisper-base.en", "fp16"),
-            "int8": ("onnx-community/whisper-base.en", "int8"),
-        },
-    },
-    "whisper-small": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-small", None),
-            "fp16": ("onnx-community/whisper-small", "fp16"),
-            "int8": ("onnx-community/whisper-small", "int8"),
-        },
-    },
-    "whisper-small.en": {
-        "family": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-small.en", None),
-            "fp16": ("Xenova/whisper-small.en", "fp16"),
-            "int8": ("onnx-community/whisper-small.en", "int8"),
-        },
-    },
-    "whisper-medium": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-medium-ONNX", None),
-            "fp16": ("onnx-community/whisper-medium-ONNX", "fp16"),
-            "int8": ("onnx-community/whisper-medium-ONNX", "int8"),
-        },
-    },
-    "whisper-medium.en": {
-        "family": "whisper",
-        "languages": ["en"],
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("Xenova/whisper-medium.en", None),
-            "fp16": ("Xenova/whisper-medium.en", "fp16"),
-            "int8": ("Xenova/whisper-medium.en", "quantized"),
-        },
-    },
-    "whisper-large-v3": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-large-v3-ONNX", None),
-            "fp16": ("onnx-community/whisper-large-v3-ONNX", "fp16"),
-            "int8": ("onnx-community/whisper-large-v3-ONNX", "int8"),
-        },
-    },
-    "whisper-large-v3-turbo": {
-        "family": "whisper",
-        "languages": _WHISPER_LANGUAGES,
-        "chunk_target_sec": 25.0,
-        "chunk_max_sec": 30.0,
-        "quantizations": {
-            "fp32": ("onnx-community/whisper-large-v3-turbo", None),
-            "fp16": ("onnx-community/whisper-large-v3-turbo", "fp16"),
-            "int8": ("onnx-community/whisper-large-v3-turbo", "int8"),
-        },
+    "whisper": {
+        "encoder_model.onnx": "onnx/encoder_model.onnx",
+        "decoder_model_merged.onnx": "onnx/decoder_model_merged.onnx",
+        "vocab.json": "vocab.json",
+        "added_tokens.json": "added_tokens.json",
+        "config.json": "config.json",
     },
 }
-# Every entry lists the languages it transcribes: served on its model card, and
-# ["en"] marks an English-only model whose word times the aligner may take.
-# Every entry states the chunk length long audio is cut to: "chunk_target_sec"
-# preferred, "chunk_max_sec" at most (and audio no longer than that is not cut
-# at all). Parakeet v2, fp32 and int8 alike, hears whole stretches of clear
-# speech in a chunk of 45 s or more as silence, which ones depending
-# chaotically on where the chunk starts; no 20 or 30 s chunk did (#36).
-# Parakeet v3 is the other way round: it loses more speech in 20-30 s chunks
-# than in 60 s ones.
+# How routes.py treats a model's output: Parakeet's TDT tokens carry word times,
+# Whisper returns text only.
+MODEL_FAMILIES = {"parakeet", "whisper"}
+_KEYS = {"family", "onnx_asr_type", "languages", "chunk_target_sec", "chunk_max_sec", "quantizations"}
+_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def validate_catalog(models: Dict[str, Any]) -> None:
+    """Raise ValueError naming the first thing wrong with a catalog's models."""
+    if not isinstance(models, dict) or not models:
+        raise ValueError("`models` must map model names to entries")
+    for name, entry in models.items():
+        # Requests are matched lowercased, so a mixed-case name could never be asked for.
+        if not isinstance(name, str) or name != name.lower():
+            raise ValueError(f"{name!r}: model names must be lowercase strings")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{name}: an entry must be a mapping")
+        if missing := _KEYS - entry.keys():
+            raise ValueError(f"{name}: missing {sorted(missing)}")
+        if not isinstance(entry["family"], str) or entry["family"] not in MODEL_FAMILIES:
+            raise ValueError(f"{name}: family {entry['family']!r} is not one of {sorted(MODEL_FAMILIES)}")
+        onnx_asr_type = entry["onnx_asr_type"]
+        if not isinstance(onnx_asr_type, str) or onnx_asr_type not in ONNX_ASR_DEFAULT_FILES:
+            raise ValueError(
+                f"{name}: onnx_asr_type {onnx_asr_type!r} is not one of {sorted(ONNX_ASR_DEFAULT_FILES)}"
+            )
+        defaults = ONNX_ASR_DEFAULT_FILES[onnx_asr_type]
+        languages = entry["languages"]
+        if not isinstance(languages, list) or not languages or not all(isinstance(x, str) for x in languages):
+            # A bare `no` (Norwegian) arrives as False: quote language codes.
+            raise ValueError(f"{name}: languages must be a non-empty list of quoted codes")
+        target, maximum = entry["chunk_target_sec"], entry["chunk_max_sec"]
+        if not all(isinstance(x, (int, float)) for x in (target, maximum)) or not 0 < target <= maximum:
+            raise ValueError(f"{name}: need 0 < chunk_target_sec <= chunk_max_sec")
+        quantizations = entry["quantizations"]
+        if not isinstance(quantizations, dict) or "fp32" not in quantizations:
+            raise ValueError(f"{name}: quantizations must include fp32, the default")
+        graphs = [f for f in defaults if f.endswith(".onnx")]
+        loads: Dict[tuple, str] = {}
+        for quant, variant in quantizations.items():
+            where = f"{name}:{quant}"
+            if not isinstance(quant, str) or quant != quant.lower():
+                raise ValueError(f"{where}: quantization names must be lowercase strings")
+            if not isinstance(variant, dict) or not isinstance(variant.get("repo"), str):
+                raise ValueError(f"{where}: needs a repo")
+            # Quote it: an unquoted SHA can load as a number.
+            if not isinstance(variant.get("revision"), str) or not _REVISION.fullmatch(variant["revision"]):
+                raise ValueError(f"{where}: revision must be a quoted 40-character commit SHA")
+            files = variant.get("files", {})
+            if not isinstance(files, dict) or not all(isinstance(x, str) for x in (*files, *files.values())):
+                raise ValueError(f"{where}: files must map onnx-asr names to repo paths")
+            for extra in files.keys() - defaults.keys():
+                # Anything else is external data (possibly sharded, .data.000),
+                # named as its .onnx refers to it.
+                if not (any(extra.startswith(g) for g in graphs) and "data" in extra):
+                    raise ValueError(f"{where}: {extra!r} is neither a file onnx-asr reads nor external data")
+            # A quantization that forgot its `files` would quietly load another's.
+            key = (variant["repo"], variant["revision"], tuple(sorted({**defaults, **files}.items())))
+            if key in loads:
+                raise ValueError(f"{where}: loads the same files as {name}:{loads[key]}; name its own in `files`")
+            loads[key] = quant
+
+
+def load_catalog(path: Path) -> Dict[str, Any]:
+    """Read and validate a catalog file; return its models."""
+    with open(path, encoding="utf-8") as handle:
+        catalog = yaml.safe_load(handle)
+    try:
+        if not isinstance(catalog, dict):
+            raise ValueError("expected a mapping with a `models` key")
+        validate_catalog(catalog.get("models"))
+    except ValueError as exc:
+        raise RuntimeError(f"invalid model catalog {path}: {exc}") from None
+    models = catalog["models"]
+    # Spell out every file here, so loading never has to know about defaults.
+    for entry in models.values():
+        for variant in entry["quantizations"].values():
+            variant["files"] = {**ONNX_ASR_DEFAULT_FILES[entry["onnx_asr_type"]], **variant.get("files", {})}
+    return models
+
+
+CATALOG_PATH = Path(os.getenv("PARAKEET_MODEL_CATALOG") or Path(__file__).with_name("models.yaml"))
+MODEL_CONFIGS = load_catalog(CATALOG_PATH)
 
 USE_GPU = _env_choice("PARAKEET_USE_GPU", "true", {"auto", "true", "false"})
 
@@ -292,7 +225,7 @@ PRELOAD_MODELS = [
 # ---------------------------------------------------------------------------
 TARGET_SR = 16_000
 
-# Chunk lengths are per model (MODEL_CONFIGS). This is the shortest chunk cut
+# Chunk lengths are per model (models.yaml). This is the shortest chunk cut
 # at a pause, capped at the model's own target.
 CHUNK_MIN_SEC = _env_float("PARAKEET_CHUNK_MIN_SEC", 20.0, minimum=0.0)
 

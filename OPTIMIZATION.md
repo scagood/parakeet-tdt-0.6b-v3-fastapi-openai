@@ -180,6 +180,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_HOST`            | `0.0.0.0`    | bind host                                                |
 | `PARAKEET_PORT`            | `5092`       | bind port (matches the legacy service)                   |
 | `PARAKEET_MODELS_DIR`      | `./models`   | Hugging Face cache directory for the ONNX weights        |
+| `PARAKEET_MODEL_CATALOG`   | built-in     | YAML file replacing `parakeet_service/models.yaml`; validated at startup |
 | `PARAKEET_PRELOAD_MODELS`  | empty        | comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before ready; requests must still name `model=` |
 | `PARAKEET_INFER_WORKERS`   | `min(4, logical CPUs ÷ intra-op threads)` | parallel ORT workers in `InferencePool` when `PARAKEET_BATCHED=0`; logical CPUs are clamped to the cgroup quota |
 | `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU      |
