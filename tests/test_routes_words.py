@@ -285,6 +285,15 @@ async def test_a_bad_aligner_is_a_400_naming_the_choices(calls, aligner_name, qu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_format", ["verbose_json", "json"])
+@pytest.mark.parametrize("granularity", ["char", "Word", "words"])
+async def test_an_unknown_granularity_is_a_400(calls, response_format, granularity):
+    with pytest.raises(HTTPException) as caught:
+        await _transcribe(response_format=response_format, granularity=granularity)
+    assert caught.value.status_code == 400 and repr(granularity) in caught.value.detail
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response_format", "granularity"),
     [("verbose_json", None), ("verbose_json", "segment"), ("json", "word"), ("srt", "word")],

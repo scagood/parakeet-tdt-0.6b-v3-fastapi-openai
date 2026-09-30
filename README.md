@@ -321,7 +321,8 @@ volumes:
 
 `response_format` accepts `json` (default), `text`, `srt`, `vtt` and
 `verbose_json`. `verbose_json` returns segments, and word timestamps as well
-when `timestamp_granularities[]=word` is sent.
+when `timestamp_granularities[]=word` is sent. `timestamp_granularities[]`
+takes `word` and `segment` (segments come either way); anything else is a 400.
 
 #### Word timestamps
 

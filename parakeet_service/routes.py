@@ -35,6 +35,7 @@ from .model import loaded_models, variant_key
 
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
+_GRANULARITIES = {"word", "segment"}  # OpenAI's; segments come with verbose_json anyway
 
 # Parakeet TDT reports token START times only (80 ms encoder frames); its
 # duration head emits at most 4 frames per token, so a token's audio never
@@ -783,6 +784,11 @@ async def transcribe(
     granularities = set(timestamp_granularities or []) | set(
         timestamp_granularities_plain or []
     )
+    if unknown := granularities - _GRANULARITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"timestamp_granularities takes {sorted(_GRANULARITIES)}; got {sorted(unknown)}",
+        )
     _validate_language(language)
     heard = _transcript_language(model_name, language)
     # Naming an aligner is asking for aligned word times; there is no default.
