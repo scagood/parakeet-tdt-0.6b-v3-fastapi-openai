@@ -140,6 +140,23 @@ def _validate_model(model: str) -> str:
     return normalized
 
 
+def _named(value: str, quantization: Optional[str], field: str, quantization_field: str) -> Tuple[str, Optional[str]]:
+    """A `model` or `aligner` value, "name" or "name:quantization", as (name,
+    quantization): the quantization may come from either form, and must agree
+    when both are sent."""
+    name, colon, suffix = value.partition(":")
+    if not colon:
+        return value, quantization
+    suffix = suffix.strip().lower()
+    if not suffix:
+        raise HTTPException(status_code=400, detail=f"{field} {value!r} has no quantization after ':'")
+    if quantization is not None and quantization.strip().lower() != suffix:
+        raise HTTPException(
+            status_code=400, detail=f"{field} {value!r} says {suffix!r} but {quantization_field} says {quantization!r}"
+        )
+    return name, suffix
+
+
 def _variant(model_name: str, quantization: Optional[str]) -> str:
     """The "model:quant" key a request runs on; fp32 unless it asks otherwise."""
     try:
@@ -757,6 +774,7 @@ async def transcribe(
     aligner_quantization: Optional[str] = Form(None),
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
+    model, quantization = _named(model, quantization, "model", "quantization")
     model_name = _validate_model(model)
     model_key = _variant(model_name, quantization)
     family = _family(model_name)
@@ -768,6 +786,10 @@ async def transcribe(
     _validate_language(language)
     heard = _transcript_language(model_name, language)
     # Naming an aligner is asking for aligned word times; there is no default.
+    if aligner_name is not None:
+        aligner_name, aligner_quantization = _named(
+            aligner_name, aligner_quantization, "aligner", "aligner_quantization"
+        )
     choice = _validate_aligner(aligner_name, aligner_quantization)
     speak = _speaks(spoken_numbers, heard)
     # Word timestamps: Parakeet emits them from its TDT tokens. Whisper returns
@@ -865,8 +887,13 @@ async def transcribe_batch(
             status_code=413,
             detail=f"Batch contains {len(files)} files; limit is {MAX_BATCH_FILES}",
         )
+    model, quantization = _named(model, quantization, "model", "quantization")
     model_name = _validate_model(model)
     model_key = _variant(model_name, quantization)
+    if aligner_name is not None:
+        aligner_name, aligner_quantization = _named(
+            aligner_name, aligner_quantization, "aligner", "aligner_quantization"
+        )
     choice = _validate_aligner(aligner_name, aligner_quantization)  # it only hears numbers here
     target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     filenames = [upload.filename or "unnamed" for upload in files]

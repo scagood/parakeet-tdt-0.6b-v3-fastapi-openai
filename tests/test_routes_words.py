@@ -119,14 +119,16 @@ async def _transcribe(
     aligner_name=None,
     aligner_quantization=None,
     spoken_numbers=None,
+    model="parakeet-v3",
+    quantization=None,
 ):
     state = _state()
     try:
         response = await routes.transcribe(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
-            model="parakeet-v3",
-            quantization=None,
+            model=model,
+            quantization=quantization,
             response_format=response_format,
             timestamp_granularities=[granularity] if granularity else None,
             timestamp_granularities_plain=None,
@@ -216,6 +218,38 @@ async def test_the_aligners_language_is_checked_only_for_word_times(calls):
     assert body["text"] == "hello world" and calls == []
     with pytest.raises(HTTPException, match="does not align 'fr'"):
         await _transcribe(language="fr", aligner_name=BASE)
+
+
+@pytest.mark.asyncio
+async def test_model_and_aligner_take_a_quantization_after_a_colon(calls, monkeypatch):
+    keys = []
+    submit = _Worker.submit_many
+
+    async def recording(self, pieces, model_key):
+        keys.append(model_key)
+        return await submit(self, pieces, model_key)
+
+    monkeypatch.setattr(_Worker, "submit_many", recording)
+    await _transcribe(model="parakeet-v3:int8", language="en", aligner_name=f"{BASE}:fp32")
+    assert keys == ["parakeet-v3:int8"]
+    assert calls[0]["aligner"] == (BASE, "fp32")
+    assert await _batch("hello", model="parakeet-v3:int8", aligner_name=f"{BASE}:fp32") == ["hello"]
+    assert keys[-1] == "parakeet-v3:int8"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "complaint"),
+    [
+        ({"model": "parakeet-v3:fp16", "quantization": "int8"}, "quantization says 'int8'"),
+        ({"aligner_name": f"{BASE}:fp32", "aligner_quantization": "int8"}, "aligner_quantization says 'int8'"),
+        ({"aligner_name": f"{BASE}:"}, "no quantization"),
+    ],
+)
+async def test_a_colon_and_a_quantization_field_must_agree(calls, fields, complaint):
+    with pytest.raises(HTTPException) as caught:
+        await _transcribe(language="en", **fields)
+    assert caught.value.status_code == 400 and complaint in caught.value.detail
 
 
 @pytest.mark.asyncio

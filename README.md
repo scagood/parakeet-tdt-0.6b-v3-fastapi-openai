@@ -231,6 +231,9 @@ print(transcript)
 Every request must name its `model`; there is no server default, and a request
 without one is rejected with 422. Precision is a separate, optional
 `quantization` field: `fp32` (the default, on any hardware), `fp16` or `int8`.
+It can also follow the name after a colon: `model=parakeet-v3:fp16` is the same
+as `model=parakeet-v3` with `quantization=fp16`; if a request sends both, they
+must agree.
 `GET /v1/models` lists every model with the languages it transcribes and the
 quantizations it offers.
 
@@ -329,7 +332,8 @@ own word times sit on 80 ms frames and their ends are estimated; aligned times
 sit on 20 ms frames and the ends come from the audio.
 
 A request names the aligner, as it names the model: send the form field
-`aligner`, and optionally `aligner_quantization` (else the aligner's default).
+`aligner`, and optionally `aligner_quantization` (else the aligner's default),
+or both at once as `aligner=wav2vec2-base-960h:fp32`.
 There is no default aligner: a request that names none gets Parakeet's times.
 `GET /v1/aligners` lists them, like `GET /v1/models`:
 
