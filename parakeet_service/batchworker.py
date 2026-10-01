@@ -71,6 +71,8 @@ class InferencePool:
     async def submit_many(self, wavs: List[np.ndarray], model_name: str) -> List[Any]:
         if not wavs:
             return []
+        # Load once up front: in-flight pieces would each retry a failed load.
+        await asyncio.to_thread(self._get_model, model_name)
         return list(
             await asyncio.gather(*(self.submit(wav, model_name) for wav in wavs))
         )
@@ -131,6 +133,8 @@ class BatchWorker:
     async def submit_many(self, wavs: List[np.ndarray], model_name: str) -> List[Any]:
         if not wavs:
             return []
+        # Load once up front: each batch of these jobs would retry a failed load.
+        await asyncio.to_thread(self._get_model, model_name)
         jobs = [self._new_job(wav, model_name) for wav in wavs]
         for job in jobs:
             await self._queue.put(job)

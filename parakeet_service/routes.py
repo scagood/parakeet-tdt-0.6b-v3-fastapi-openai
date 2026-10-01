@@ -33,7 +33,7 @@ from .config import (
     UPLOAD_READ_CHUNK_BYTES,
     logger,
 )
-from .model import loaded_models, variant_key
+from .model import ModelLoadError, loaded_models, variant_key
 
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
@@ -612,11 +612,14 @@ async def _stitch_request(
     return await loop.run_in_executor(state.align_pool if needs else state.audio_pool, stitch)
 
 
-async def _infer_prepared(request: Request, prepared: _PreparedAudio, model_key: str):
+async def _infer(request: Request, pieces: List[Any], model_key: str):
     worker = request.app.state.worker
     if worker is None or not getattr(request.app.state, "ready", False):
         raise HTTPException(status_code=503, detail="Model is not ready")
-    return await worker.submit_many(prepared.pieces, model_key)
+    try:
+        return await worker.submit_many(pieces, model_key)
+    except ModelLoadError as exc:  # load_model logged it
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 _MODEL_CREATED = 1785888000  # catalog introduction (2026-08-05), fixed for stable output
@@ -826,7 +829,7 @@ async def transcribe(
     decode_ms = (time.perf_counter() - started) * 1000
 
     infer_started = time.perf_counter()
-    results = await _infer_prepared(request, prepared, model_key)
+    results = await _infer(request, prepared.pieces, model_key)
     infer_ms = (time.perf_counter() - infer_started) * 1000
 
     stitch_started = time.perf_counter()
@@ -963,10 +966,7 @@ async def transcribe_batch(
         )
 
     flattened = [piece for item in prepared_files for piece in item.pieces]
-    worker = request.app.state.worker
-    if worker is None or not getattr(request.app.state, "ready", False):
-        raise HTTPException(status_code=503, detail="Model is not ready")
-    flat_results = await worker.submit_many(flattened, model_key)
+    flat_results = await _infer(request, flattened, model_key)
 
     # The batch endpoint takes no `language`: the default decides, unless the
     # model is English-only.
