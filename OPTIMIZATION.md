@@ -1,4 +1,4 @@
-# Optimization Report: `parakeet-tdt-0.6b-v3-fastapi-openai`
+# Optimization Report: `stt-api`
 
 ## TL;DR
 
@@ -149,7 +149,7 @@ changing code" and "identify bottlenecks with evidence":
 ## Architecture
 
 ```
-parakeet-tdt-0.6b-v3-fastapi-openai/
+stt-api/
 ├── server.py                    # New uvicorn entry point (port 5092)
 ├── pin_pcores.sh                # Optional P-core taskset wrapper
 └── parakeet_service/
@@ -210,7 +210,7 @@ Chunk lengths are per model (`chunk_target_sec` / `chunk_max_sec` in
 `MODEL_CONFIGS`), not configurable: Parakeet v3 chunks at 60/75 s, Whisper and
 Parakeet v2 at 25/30 s. Whisper's encoder only sees 30 s, and Parakeet v2 drops
 whole stretches of speech from chunks of 45 s or more
-([#36](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/issues/36)).
+([#36](https://github.com/scagood/stt-api/issues/36)).
 
 Request limits, all rejected with `413`:
 
