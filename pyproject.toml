@@ -4,7 +4,7 @@
 # one machine-readable place. `pip`, `uv` and most tooling read
 # `requires-python` and refuse to install into an older interpreter.
 [project]
-name = "parakeet-tdt-0.6b-v3-fastapi-openai"
+name = "stt-api"
 version = "1.5.0"  # x-release-please-version
-description = "OpenAI-compatible ASR service for Parakeet TDT 0.6B v3 on ONNX Runtime"
+description = "OpenAI-compatible speech-to-text server on ONNX Runtime"
 requires-python = ">=3.14"
