@@ -1,5 +1,64 @@
 # Changelog
 
+## [2.0.0](https://github.com/scagood/stt-api/compare/v1.5.0...v2.0.0) (2026-10-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **words:** `align_words` and PARAKEET_ALIGN_WORDS are removed; send `aligner` instead. /health reports aligner state as "name:quantization". A custom catalog's `aligners` entries need the new shape.
+* **api:** `model` is required and names a model, not a precision: parakeet-v3-fp32/-fp16/-int8 and the other -quant names are gone (send `quantization` instead, default fp32 also on GPU), as are the aliases (parakeet-tdt-0.6b-v3, HF repo ids, whisper-large, whisper-turbo, ...) and PARAKEET_DEFAULT_MODEL. Nothing is preloaded unless PARAKEET_PRELOAD_MODELS is set. Model cards drop `aliases`, gain `quantizations`, and report `owned_by` as the model's author (nvidia, openai); /health drops `default_model`.
+* **models:** PARAKEET_CHUNK_TARGET_SEC and PARAKEET_CHUNK_MAX_SEC are removed; chunk lengths are per model. PARAKEET_CHUNK_MIN_SEC remains.
+* Python 3.14 is now the minimum supported interpreter, and the legacy Flask service (`app.py`) and its browser upload page at `/` are removed. The OpenAI-compatible API under `parakeet_service/` is unchanged.
+
+### 🌟 Features
+
+* **api:** name a model and pick its precision separately; fix the Whisper catalog ([da78ff9](https://github.com/scagood/stt-api/commit/da78ff96e0a1cd904e89c8e000fc90b54e63d394))
+* **audio:** decode stereo and 24-bit WAVs in process ([#22](https://github.com/scagood/stt-api/issues/22)) ([35d843c](https://github.com/scagood/stt-api/commit/35d843c872fdd01d14fe13a10113067826117d23)), closes [#15](https://github.com/scagood/stt-api/issues/15)
+* **compare:** a page to compare models and aligners by ear ([#48](https://github.com/scagood/stt-api/issues/48)) ([1a88458](https://github.com/scagood/stt-api/commit/1a88458247c8f2f1ecb637b433946998c919674d))
+* **models:** add opt-in Whisper model support ([#25](https://github.com/scagood/stt-api/issues/25)) ([2e6aaf5](https://github.com/scagood/stt-api/commit/2e6aaf5b78d4a3f56a5c8547e14c56b4a85553b2))
+* **models:** opt-in LRU cap on the loaded-model cache ([#37](https://github.com/scagood/stt-api/issues/37)) ([dd71261](https://github.com/scagood/stt-api/commit/dd71261052d1dbeca52bd07a0d2c045cf31457a5))
+* **models:** serve parakeet-v3 from Olicorne's re-export ([#42](https://github.com/scagood/stt-api/issues/42)) ([a819f87](https://github.com/scagood/stt-api/commit/a819f8776095879f07d70afefd861e8b56441f7f))
+* **models:** YAML model catalog with pinned, explicit files ([#41](https://github.com/scagood/stt-api/issues/41)) ([f2439eb](https://github.com/scagood/stt-api/commit/f2439eb47b38cd256c22597e7107f54616d9fef1))
+* require Python 3.14 and drop the legacy Flask service ([#11](https://github.com/scagood/stt-api/issues/11)) ([250dfeb](https://github.com/scagood/stt-api/commit/250dfeb8c55e6401fdb54163915a83b3f9182638))
+* **transcripts:** opt-in spoken-form numbers, money and units ([#30](https://github.com/scagood/stt-api/issues/30)) ([d1245e4](https://github.com/scagood/stt-api/commit/d1245e4b35db0286370a724a6182dc846f83fc5d))
+* **words:** align English word timestamps with wav2vec2 ([#26](https://github.com/scagood/stt-api/issues/26)) ([f2bc41d](https://github.com/scagood/stt-api/commit/f2bc41d3d8daa291c281a1fe56bd2aaa63c185b3))
+* **words:** make word alignment opt-in per request ([#33](https://github.com/scagood/stt-api/issues/33)) ([9dbf5eb](https://github.com/scagood/stt-api/commit/9dbf5ebb7db157586072661b0870fe585c6981f8))
+* **words:** named word aligners from the model catalog, in Parakeet v3's 25 languages ([#45](https://github.com/scagood/stt-api/issues/45)) ([07193b4](https://github.com/scagood/stt-api/commit/07193b43f78d194fbead9aa7c3d6068fb6915fa2))
+* **words:** Whisper word timestamps via forced alignment + real language list ([#34](https://github.com/scagood/stt-api/issues/34)) ([612aec4](https://github.com/scagood/stt-api/commit/612aec4f847f83441fff19c053efb06d6a8ab46e))
+
+
+### 🩹 Fixes
+
+* **docker:** compose healthchecks wait for /healthz, not /health ([510625e](https://github.com/scagood/stt-api/commit/510625e215b94e31f1c8ed1f9657d09548c4d652))
+* **models:** answer 503 naming the model when it cannot be loaded ([#50](https://github.com/scagood/stt-api/issues/50)) ([8c2a679](https://github.com/scagood/stt-api/commit/8c2a679e2c051c8648e02eb7f0dcb2c872d52758))
+* **models:** chunk Parakeet v2 at 25/30 s so long audio stops dropping speech ([#39](https://github.com/scagood/stt-api/issues/39)) ([4037c62](https://github.com/scagood/stt-api/commit/4037c62e17457522aaf8ec1c1ec9a857ebb01a09))
+* **models:** keep ONNX external data beside its model in the HF cache ([73a44e0](https://github.com/scagood/stt-api/commit/73a44e0e4356b13fa9cf1002c87aa9fa3263e72c)), closes [#35](https://github.com/scagood/stt-api/issues/35)
+
+
+### 📚 Documentation
+
+* add the 1.5.0 to 2.0.0 upgrade guide ([63b735e](https://github.com/scagood/stt-api/commit/63b735e4e34964e8c905ebceb7158ec5ae1b3e66))
+* correct the model names, defaults and missing endpoints ([#21](https://github.com/scagood/stt-api/issues/21)) ([c90be47](https://github.com/scagood/stt-api/commit/c90be47db0066449f568bfe89a142a978923fe4e)), closes [#16](https://github.com/scagood/stt-api/issues/16)
+* correct what the docs say is true today ([a459ae5](https://github.com/scagood/stt-api/commit/a459ae5440a1f2929f58add8295a75f0fd4a113f))
+* restructure the README around using the API; one config reference ([42d6208](https://github.com/scagood/stt-api/commit/42d6208feb8a4d880c68dfc8a5c2f1cb2e341a19))
+
+
+### 📦 Dependencies
+
+* **pkg:** drop the unused openai and typing_extensions pins ([#18](https://github.com/scagood/stt-api/issues/18)) ([0e25b2c](https://github.com/scagood/stt-api/commit/0e25b2c192a4806bae5d845ab0d20ce3d5e0a3a9)), closes [#12](https://github.com/scagood/stt-api/issues/12)
+
+
+### 🧹 Chores
+
+* delete the three unreferenced root diagnostic scripts ([#19](https://github.com/scagood/stt-api/issues/19)) ([e2ee3c0](https://github.com/scagood/stt-api/commit/e2ee3c01b98f82bff1345acb9cca0baa28502efb)), closes [#13](https://github.com/scagood/stt-api/issues/13)
+* remove the unreferenced parakeet.png ([#20](https://github.com/scagood/stt-api/issues/20)) ([48df6f3](https://github.com/scagood/stt-api/commit/48df6f3b713d487236399309aea9d27c2fb3adab)), closes [#14](https://github.com/scagood/stt-api/issues/14)
+* rename the project to stt-api ([422e145](https://github.com/scagood/stt-api/commit/422e1458a1df8a0377b4a74327e76bbb87491cec))
+
+
+### 🤖 Automation
+
+* **docker:** smoke-test the CPU image by loading parakeet-v3 int8 ([#52](https://github.com/scagood/stt-api/issues/52)) ([ae10c97](https://github.com/scagood/stt-api/commit/ae10c973bfb146e74d96f58f3b206dd358fcd419))
+
 ## [1.5.0](https://github.com/scagood/parakeet-tdt-0.6b-v3-fastapi-openai/compare/v1.4.0...v1.5.0) (2026-09-17)
 
 
