@@ -267,7 +267,11 @@ deliberately rather than by default.
 Models named in `PARAKEET_PRELOAD_MODELS` (as `model` for fp32, or
 `model:quantization`) are loaded (and warmed up) before the service reports
 ready; the others are lazy-loaded on first use and cached afterwards. A
-preloaded model is never used for a request that names another.
+preloaded model is never used for a request that names another. A model that
+cannot be loaded (its download fails, it is missing from the cache under
+`PARAKEET_HF_OFFLINE=true`, ONNX Runtime refuses it) answers 503 with a
+`detail` naming the model and the cause; the failure is not cached, so the
+next request tries again.
 
 **To select a model and precision via API:**
 ```python

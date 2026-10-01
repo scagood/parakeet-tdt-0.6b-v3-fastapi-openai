@@ -32,6 +32,10 @@ _MODEL_LOCK = threading.RLock()
 _CUDA_PRELOADED = False
 
 
+class ModelLoadError(RuntimeError):
+    """A model could not be fetched or loaded. Nothing is cached: the next call retries."""
+
+
 def _preload_cuda_libraries() -> bool:
     """Load CUDA/cuDNN libraries before creating any ORT session."""
     global _CUDA_PRELOADED
@@ -192,37 +196,42 @@ def load_model(key: str, *, with_timestamps: bool = True):
         name, _, quant = key.partition(":")
         config = MODEL_CONFIGS[name]
         variant = config["quantizations"][quant]
-        providers = _resolve_providers()
-        session_options = _build_sess_options()
-        logger.info(
-            "Loading %s from %s providers=%s intra=%d inter=%d",
-            key,
-            variant["repo"],
-            providers,
-            ORT_INTRA_THREADS,
-            ORT_INTER_THREADS,
-        )
-        # onnx-asr reads every file while it loads, so the links only need to
-        # live that long; a folder per load keeps replicas sharing the models
-        # volume out of each other's way.
-        with tempfile.TemporaryDirectory(dir=MODELS_DIR, prefix=".load-") as folder:
-            _link_files(variant, Path(folder))
-            model = onnx_asr.load_model(
-                config["onnx_asr_type"],
-                folder,
-                providers=providers,
-                sess_options=session_options,
+        try:
+            providers = _resolve_providers()
+            session_options = _build_sess_options()
+            logger.info(
+                "Loading %s from %s providers=%s intra=%d inter=%d",
+                key,
+                variant["repo"],
+                providers,
+                ORT_INTRA_THREADS,
+                ORT_INTER_THREADS,
             )
-        # Verified on onnx_asr 0.12.0 (whisper-tiny): .with_timestamps() works
-        # for Whisper, but the standard onnx-community/whisper-* repos carry no
-        # alignment heads, so it returns empty tokens/timestamps — text only.
-        # The token/timestamp shape _stitch consumes is Parakeet TDT's anyway,
-        # so keep Whisper on the plain text adapter (its .recognize() returns the
-        # transcript string). Whisper word times would come from forced-aligning
-        # that transcript against the audio, not from the model.
-        if with_timestamps and config["family"] == "parakeet":
-            model = model.with_timestamps()
-        _validate_gpu_binding(key, model)
+            # onnx-asr reads every file while it loads, so the links only need to
+            # live that long; a folder per load keeps replicas sharing the models
+            # volume out of each other's way.
+            with tempfile.TemporaryDirectory(dir=MODELS_DIR, prefix=".load-") as folder:
+                _link_files(variant, Path(folder))
+                model = onnx_asr.load_model(
+                    config["onnx_asr_type"],
+                    folder,
+                    providers=providers,
+                    sess_options=session_options,
+                )
+            # Verified on onnx_asr 0.12.0 (whisper-tiny): .with_timestamps() works
+            # for Whisper, but the standard onnx-community/whisper-* repos carry no
+            # alignment heads, so it returns empty tokens/timestamps — text only.
+            # The token/timestamp shape _stitch consumes is Parakeet TDT's anyway,
+            # so keep Whisper on the plain text adapter (its .recognize() returns the
+            # transcript string). Whisper word times would come from forced-aligning
+            # that transcript against the audio, not from the model.
+            if with_timestamps and config["family"] == "parakeet":
+                model = model.with_timestamps()
+            _validate_gpu_binding(key, model)
+        except Exception as exc:
+            error = ModelLoadError(f"Model {key!r} could not be loaded: {type(exc).__name__}: {exc}")
+            logger.exception("%s", error)
+            raise error from exc
         _MODELS[cache_key] = model
         # ponytail: LRU cap, drop least-recent so a many-model sweep fits RAM.
         while MODEL_CACHE_SIZE and len(_MODELS) > MODEL_CACHE_SIZE:
