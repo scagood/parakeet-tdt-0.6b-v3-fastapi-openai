@@ -9,6 +9,9 @@ on:
       - "Dockerfile.*"
       - "requirements.txt"
       - ".github/workflows/docker.yml"
+      # What the smoke test below loads, and the code that loads it.
+      - "parakeet_service/models.yaml"
+      - "parakeet_service/model.py"
 
 permissions:
   contents: read
@@ -59,13 +62,43 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           file: Dockerfile.${{ matrix.flavor }}
           platforms: ${{ matrix.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
+          # A pull request builds the CPU image for one platform, so it can be
+          # loaded into the runner's Docker for the smoke test.
+          load: ${{ github.event_name == 'pull_request' && matrix.flavor == 'cpu' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.flavor }}
           # A pull request cannot restore another's cache, so it only reads.
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.flavor) || '' }}
+
+      # Start the image as a replica starts: it answers /healthz only once
+      # PARAKEET_PRELOAD_MODELS has loaded and run a warm-up inference through
+      # ONNX Runtime, and exits if either fails. CI otherwise stubs ONNX
+      # Runtime, so this is the one check that a dependency bump still runs a
+      # real model. int8 is parakeet-v3's smallest download (~670 MB). The
+      # runner has no GPU, so the GPU image is only built.
+      - name: Smoke test (load parakeet-v3 int8, run one inference)
+        if: github.event_name == 'pull_request' && matrix.flavor == 'cpu'
+        env:
+          IMAGE: ${{ steps.build.outputs.imageid }}
+        run: |
+          docker run -d --name smoke -p 5092:5092 \
+            -e PARAKEET_PRELOAD_MODELS=parakeet-v3:int8 "$IMAGE"
+          # Up to 10 minutes: download, load, and the 120 s warm-up bound.
+          for _ in $(seq 120); do
+            if curl -fs http://127.0.0.1:5092/healthz; then
+              docker logs smoke
+              exit 0
+            fi
+            [ "$(docker inspect -f '{{.State.Running}}' smoke)" = true ] || break
+            sleep 5
+          done
+          docker logs smoke
+          echo "::error::the image never answered /healthz; its logs are above"
+          exit 1
