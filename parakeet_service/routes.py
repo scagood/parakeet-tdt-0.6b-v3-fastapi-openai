@@ -7,10 +7,11 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from . import aligner, spoken
 from .audio import load_audio
@@ -18,6 +19,7 @@ from .chunker import auto_chunk, slice_chunks
 from .config import (
     ALIGNER_CONFIGS,
     CHUNK_MIN_SEC,
+    COMPARE_UI,
     CPU_INFO,
     LANGUAGE_CODE,
     MAX_AUDIO_SECONDS,
@@ -688,6 +690,15 @@ def health(request: Request):
         "cpu": CPU_INFO,
         "aligner": aligner.status(),
     }
+
+
+@router.get("/compare", include_in_schema=False)
+def compare_page():
+    """The page for comparing models and aligners by ear (PARAKEET_COMPARE_UI):
+    a client of the routes here, which runs each row through /v1/audio/transcriptions."""
+    if not COMPARE_UI:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(Path(__file__).with_name("compare.html"), media_type="text/html")
 
 
 @router.get("/healthz")

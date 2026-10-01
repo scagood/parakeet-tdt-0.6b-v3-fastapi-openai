@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Compare word times</title>
+<!--
+  Served at GET /compare when PARAKEET_COMPARE_UI=true. A client of the API
+  only: the pickers come from /v1/models and /v1/aligners, and each row is one
+  POST /v1/audio/transcriptions. The browser decodes the upload once, to the
+  16 kHz mono the models hear, and sends that same audio as a WAV for every
+  row, so the waveform, playback and every row's times share one timeline.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f6f8; --surface: #fff; --ink: #161a20; --muted: #5a6473; --line: #d9dee5;
+  --wave: #a3acb9; --wave-strong: #6e7886; --accent: #1f5fbf; --select: rgba(31, 95, 191, .10);
+  --early: #b4361f; --late: #8a6a00;
+  --c0: #c8541e; --c1: #2463c9; --c2: #23855a; --c3: #7a43c2; --c4: #b83a6e; --c5: #9a7419; --c6: #0f7c8c; --c7: #5d6b00;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0e1114; --surface: #161a1f; --ink: #e6e9ed; --muted: #9aa3af; --line: #2a3038;
+    --wave: #4f5865; --wave-strong: #8e98a5; --accent: #6ea0f0; --select: rgba(110, 160, 240, .14);
+    --early: #f08a75; --late: #e0c25a;
+    --c0: #f08a55; --c1: #6ea0f0; --c2: #5cc495; --c3: #b08af0; --c4: #e77aa6; --c5: #d4ae4f; --c6: #4fc1d0; --c7: #a8bf3a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+.page { max-width: 1180px; margin: 0 auto; padding: 28px 20px 48px; display: grid; gap: 22px; }
+h1, h2, h3, p { margin: 0; }
+h1 { font-size: 26px; font-weight: 600; }
+h2 { font-size: 18px; font-weight: 600; }
+.lede, .hint { color: var(--muted); }
+.lede { max-width: 72ch; }
+.hint { font-size: 13px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 14px; min-width: 0; }
+.fields { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 18px; font-size: 13px; color: var(--muted); }
+.fields label { display: grid; gap: 4px; }
+input, select { font: 14px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; }
+input[type="number"] { width: 7em; font-family: var(--mono); }
+input[type="range"] { accent-color: var(--accent); padding: 0; }
+button:focus-visible, input:focus-visible, select:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn { font: 500 13px var(--sans); color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.btn:disabled { opacity: .5; cursor: default; }
+.specs { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13.5px; }
+.specs li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.specs .label { font-family: var(--mono); overflow-wrap: anywhere; }
+.status { color: var(--muted); }
+.status.error { color: var(--early); }
+.swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; background: var(--c); }
+.swatch.ref { background: transparent; border: 2px dashed var(--c); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; font-size: 13px; color: var(--muted); }
+.controls label { display: flex; align-items: center; gap: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: 500 13px var(--mono); background: transparent; color: var(--ink); border: 0; padding: 4px 10px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.timeline { display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr); }
+.labels { display: grid; align-content: start; border-right: 1px solid var(--line); font-size: 12.5px; }
+.labels div { display: flex; align-items: center; gap: 7px; padding-right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.scroller { overflow-x: auto; overflow-y: hidden; }
+#overview { position: sticky; left: 0; }
+#spacer { height: 1px; }
+canvas { display: block; }
+table { border-collapse: collapse; font-size: 13px; width: 100%; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+td .who { display: flex; align-items: center; gap: 7px; font-family: var(--mono); }
+.early { color: var(--early); }
+.late { color: var(--late); }
+.table-wrap { overflow-x: auto; }
+.inspector-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+.inspector-head .word { font: 500 20px var(--mono); }
+.inspector-head .when { font: 13px var(--mono); color: var(--muted); }
+@media (max-width: 640px) {
+  .page { padding-inline: 16px; }
+  h1 { font-size: 22px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <header style="display:grid;gap:8px">
+    <h1>Compare word times</h1>
+    <p class="lede">Upload a clip, cut it to size, and add rows: a model, and optionally an aligner to re-time its words. Each row is one transcription on this server, run one at a time; a model or aligner loads on the first row that names it and stays loaded. Then click any word to hear exactly the span that row gave it.</p>
+  </header>
+
+  <section class="panel" aria-labelledby="setupTitle">
+    <h2 id="setupTitle">Clip and rows</h2>
+    <div class="fields">
+      <label>Audio <input id="file" type="file" accept="audio/*,video/*"></label>
+      <label>From (s) <input id="from" type="number" min="0" step="0.1" value="0" disabled></label>
+      <label>To (s) <input id="to" type="number" min="0" step="0.1" disabled></label>
+      <label>Language <select id="language"><option value="">server default</option></select></label>
+      <label>Reference times (optional) <input id="reference" type="file" accept=".json,.srt,.vtt"></label>
+    </div>
+    <p class="hint" id="clipInfo">The file is decoded in your browser; only the clip between From and To is sent. A reference is exact word times, as JSON (<code>words</code> of a verbose_json response, or a list of <code>{word, start, end}</code>) or SRT/VTT with one cue per word, in the file's time.</p>
+    <div class="fields">
+      <label>Model <select id="model"></select></label>
+      <label>Aligner <select id="aligner"><option value="">none: the model's own times</option></select></label>
+      <button class="btn" type="button" id="addRow">Add row</button>
+    </div>
+    <ol class="specs" id="specs"></ol>
+    <div class="fields">
+      <button class="btn primary" type="button" id="run" disabled>Compare</button>
+      <span class="hint" id="runInfo" role="status"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="timelinePanel" aria-labelledby="timelineTitle" hidden>
+    <div class="controls">
+      <h2 id="timelineTitle" style="margin-right:auto">Timeline</h2>
+      <label for="zoom">Zoom <input id="zoom" type="range" min="0" max="100" value="0"></label>
+      <span class="seg" role="group" aria-label="Playback speed">
+        <button type="button" data-rate="1" aria-pressed="true">1×</button>
+        <button type="button" data-rate="0.5" aria-pressed="false">½×</button>
+      </span>
+      <button class="btn" type="button" id="playAll">Play clip</button>
+    </div>
+    <div class="timeline">
+      <div class="labels" id="labels"></div>
+      <div class="scroller" id="scroller">
+        <canvas id="overview" tabindex="0" aria-label="Waveform and each row's words. Click a word to hear it, or the waveform to play from there. Keys: left and right step through a row's words, up and down switch rows, Enter replays the word, Escape stops."></canvas>
+        <div id="spacer"></div>
+      </div>
+    </div>
+    <p class="hint">Grey is the waveform; each row below it is one row's words, and the shaded column is the selected word. Click a word, or focus the timeline and use the arrow keys: left and right step through words, up and down hear the same word from another row, Enter replays, Escape stops.</p>
+    <div class="table-wrap" id="bias" hidden></div>
+  </section>
+
+  <section class="panel" id="wordPanel" aria-labelledby="selTitle" hidden>
+    <div class="inspector-head" aria-live="polite">
+      <h2 id="selTitle" style="font-size:15px">Selected word</h2>
+      <span class="word" id="selWord"></span>
+      <span class="when" id="selWhen"></span>
+    </div>
+    <div><canvas id="zoomed" aria-label="Close-up of the selected word with each row's start and end; click to play from there"></canvas></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Row</th><th>Start</th><th>End</th><th>Length</th><th id="deltaHead"></th><th>Listen</th></tr></thead>
+        <tbody id="selRows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const RATE = 16000, PEAK = 160; // the models' sample rate; samples per waveform peak (10 ms)
+  const WAVE_H = 70, LANE_H = 24, AXIS_H = 18;
+  const $ = (id) => document.getElementById(id);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const esc = (text) => String(text).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  const ms = (d) => (d >= 0 ? "+" : "−") + Math.abs(Math.round(d * 1000)) + " ms";
+  const off = (d) => (d > 0.04 ? "late" : d < -0.04 ? "early" : "");
+  const letters = (word) => word.toLowerCase().replace(/[^\p{L}\p{N}']/gu, "");
+
+  let source = null;    // the decoded file: { name, samples }
+  let current = null;   // the clip: { samples, peaks, loudest, duration, offset, rows, wav }
+  let reference = null; // reference words, in the file's time
+  let selected = null;  // { row, index }
+  let running = false, generation = 0, colours = 0, shownScale = 1, zoomView = null;
+  const specs = [];     // { model, aligner, label, color, state, status }
+
+  // ---- audio ------------------------------------------------------------------
+  async function decode(file) {
+    const decoded = await new OfflineAudioContext(1, 1, RATE).decodeAudioData(await file.arrayBuffer());
+    const mono = new Float32Array(decoded.length);
+    for (let c = 0; c < decoded.numberOfChannels; c++) {
+      const channel = decoded.getChannelData(c);
+      for (let i = 0; i < mono.length; i++) mono[i] += channel[i] / decoded.numberOfChannels;
+    }
+    return mono;
+  }
+  function wav(samples) { // 16-bit PCM at RATE: the server reads it without ffmpeg
+    const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const text = (at, s) => [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+    text(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); text(8, "WAVEfmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, RATE, true); view.setUint32(28, RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    text(36, "data"); view.setUint32(40, samples.length * 2, true);
+    samples.forEach((v, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 0x7fff, true));
+    return new Blob([view], { type: "audio/wav" });
+  }
+  function peaks(samples) {
+    const n = Math.ceil(samples.length / PEAK), lo = new Float32Array(n), hi = new Float32Array(n);
+    for (let i = 0; i < samples.length; i++) {
+      const k = (i / PEAK) | 0, v = samples[i];
+      if (v < lo[k]) lo[k] = v;
+      if (v > hi[k]) hi[k] = v;
+    }
+    return { lo, hi };
+  }
+
+  let audio = null, node = null, playing = null, rate = 1;
+  function play(from, to) {
+    audio = audio || new AudioContext();
+    audio.resume();
+    stop();
+    const clip = current;
+    from = Math.max(0, from); to = Math.min(clip.duration, to);
+    if (to <= from) return;
+    if (!clip.buffer) {
+      clip.buffer = audio.createBuffer(1, clip.samples.length, RATE);
+      clip.buffer.copyToChannel(clip.samples, 0);
+    }
+    node = audio.createBufferSource();
+    node.buffer = clip.buffer;
+    node.playbackRate.value = rate;
+    node.connect(audio.destination);
+    node.start(0, from, to - from);
+    playing = { from, to, at: audio.currentTime, clip, rate };
+    node.onended = () => { playing = null; drawAll(); };
+    requestAnimationFrame(tick);
+  }
+  function stop() {
+    if (node) { node.onended = null; try { node.stop(); } catch {} node = null; }
+    playing = null;
+  }
+  function playhead() {
+    return playing && playing.clip === current ? Math.min(playing.to, playing.from + (audio.currentTime - playing.at) * playing.rate) : null;
+  }
+  function tick() { drawAll(); if (playing) requestAnimationFrame(tick); }
+
+  // ---- words ------------------------------------------------------------------
+  function wordFor(row, start, end) { // the row's word for [start, end]: most overlap, else nearest
+    let best = -1, bestScore = -Infinity;
+    row.words.forEach((w, i) => {
+      const overlap = Math.min(end, w.end) - Math.max(start, w.start);
+      const score = overlap > 0 ? overlap : -Math.abs((w.start + w.end) / 2 - (start + end) / 2);
+      if (score > bestScore) { bestScore = score; best = i; }
+    });
+    return best;
+  }
+  function picks() { // the selected word in every row
+    if (!selected) return [];
+    const w = selected.row.words[selected.index];
+    return current.rows.map((row) => ({ row, word: row.words[wordFor(row, w.start, w.end)] })).filter((p) => p.word);
+  }
+  function parseReference(text) {
+    const trimmed = text.trim();
+    let words;
+    if (/^[[{]/.test(trimmed)) {
+      const data = JSON.parse(trimmed);
+      words = (Array.isArray(data) ? data : data.words || []).map((w) => ({ word: String(w.word ?? w.text ?? ""), start: Number(w.start), end: Number(w.end) }));
+    } else { // SRT or VTT, one cue per word: "00:00:01,500 --> 00:00:01,900"
+      const seconds = (s) => s.trim().split(/\s/)[0].split(":").reduce((total, part) => total * 60 + Number(part.replace(",", ".")), 0);
+      words = trimmed.split(/\r?\n\s*\r?\n/).map((block) => {
+        const lines = block.split(/\r?\n/), at = lines.findIndex((line) => line.includes("-->"));
+        if (at < 0) return null;
+        const [start, end] = lines[at].split("-->").map(seconds);
+        return { word: lines.slice(at + 1).join(" ").trim(), start, end };
+      }).filter(Boolean);
+    }
+    words = words.filter((w) => Number.isFinite(w.start) && Number.isFinite(w.end) && w.end >= w.start);
+    if (!words.length) throw new Error("no word times found");
+    return words;
+  }
+  function referenceRow() {
+    const { offset, duration } = current;
+    const words = reference.filter((w) => w.start >= offset && w.end <= offset + duration)
+      .map((w) => ({ ...w, start: w.start - offset, end: w.end - offset }));
+    return { reference: true, label: "reference", color: "--ink", words };
+  }
+
+  // ---- drawing ------------------------------------------------------------------
+  function setup(canvas, width, height) {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+    canvas.style.width = width + "px"; canvas.style.height = height + "px";
+    const g = canvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return g;
+  }
+  function pxPerSec() { // the slider zooms from the whole clip to 420 px/s, geometrically
+    const fit = $("scroller").clientWidth / current.duration;
+    return fit * Math.pow(Math.max(1, 420 / fit), Number($("zoom").value) / 100);
+  }
+  function step(scale) { return [0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 300, 600].find((s) => s * scale >= 60) || 1800; }
+  function axis(g, X, from, to, y, width) { // ticks at round times in the file's time
+    const s = step(width / (to - from)), { offset } = current;
+    g.fillStyle = css("--muted");
+    for (let k = Math.ceil((from + offset) / s); k * s <= to + offset; k++) {
+      const x = Math.round(X(k * s - offset));
+      g.fillRect(x, y, 1, 5);
+      g.fillText(+(k * s).toFixed(1) + "s", Math.min(x + 3, width - 40), y + 15);
+    }
+  }
+  function drawWave(g, y0, width, height, from, to, emphasis) {
+    const per = ((to - from) * RATE) / width, coarse = per >= PEAK, unit = coarse ? PEAK : 1;
+    const lo = coarse ? current.peaks.lo : current.samples, hi = coarse ? current.peaks.hi : current.samples;
+    const mid = y0 + height / 2, k = (height * 0.48) / current.loudest;
+    g.fillStyle = css(emphasis ? "--wave-strong" : "--wave");
+    for (let x = 0; x < width; x++) {
+      const a = Math.max(0, Math.floor((from * RATE + x * per) / unit)), b = Math.max(a + 1, Math.floor((from * RATE + (x + 1) * per) / unit));
+      let min = 0, max = 0;
+      for (let i = a; i < b && i < lo.length; i++) { if (lo[i] < min) min = lo[i]; if (hi[i] > max) max = hi[i]; }
+      g.fillRect(x, mid - max * k, 1, Math.max(1, (max - min) * k));
+    }
+  }
+  function drawOverview() { // only the visible stretch: the canvas is the scroller's width
+    const sc = $("scroller"), scale = pxPerSec(), width = sc.clientWidth, left = sc.scrollLeft;
+    $("spacer").style.width = Math.ceil(current.duration * scale) + "px";
+    shownScale = scale;
+    const height = WAVE_H + current.rows.length * LANE_H + AXIS_H;
+    const g = setup($("overview"), width, height), X = (t) => t * scale - left, chosen = picks();
+    if (chosen.length) {
+      const lo = Math.min(...chosen.map((p) => p.word.start)), hi = Math.max(...chosen.map((p) => p.word.end));
+      g.fillStyle = css("--select");
+      g.fillRect(X(lo), 0, (hi - lo) * scale, height - AXIS_H);
+    }
+    drawWave(g, 4, width, WAVE_H - 8, left / scale, (left + width) / scale, false);
+    g.font = `12px ${css("--mono")}`;
+    current.rows.forEach((row, r) => {
+      const y = WAVE_H + r * LANE_H, c = css(row.color);
+      g.fillStyle = css("--line"); g.fillRect(0, y, width, 1);
+      row.words.forEach((w) => {
+        const x = X(w.start), wpx = Math.max(2, (w.end - w.start) * scale);
+        if (x + wpx < 0 || x > width) return;
+        const isSel = chosen.some((p) => p.word === w);
+        g.fillStyle = c;
+        g.globalAlpha = row.reference ? (isSel ? 0.35 : 0.14) : isSel ? 0.9 : 0.28;
+        g.fillRect(x, y + 4, wpx, LANE_H - 8);
+        g.globalAlpha = 1;
+        if (row.reference) {
+          g.setLineDash([4, 3]); g.strokeStyle = c; g.strokeRect(x + 0.5, y + 4.5, wpx - 1, LANE_H - 9); g.setLineDash([]);
+        } else {
+          g.fillRect(x, y + 4, 2, LANE_H - 8); g.fillRect(x + wpx - 2, y + 4, 2, LANE_H - 8);
+        }
+        if (wpx > 26) {
+          g.save(); g.beginPath(); g.rect(x + 4, y, wpx - 8, LANE_H); g.clip();
+          g.fillStyle = isSel && !row.reference ? css("--surface") : css("--ink");
+          g.fillText(w.word, x + 5, y + LANE_H / 2 + 4);
+          g.restore();
+        }
+      });
+    });
+    axis(g, X, left / scale, (left + width) / scale, height - AXIS_H, width);
+    const t = playhead();
+    if (t !== null) { g.fillStyle = css("--accent"); g.fillRect(X(t) - 1, 0, 2, height - AXIS_H); }
+  }
+  function drawZoomed() {
+    const canvas = $("zoomed"), chosen = picks(), width = canvas.parentElement.clientWidth, laneH = 20, waveH = 120;
+    const height = waveH + chosen.length * laneH + 24, g = setup(canvas, width, height);
+    zoomView = null;
+    if (!chosen.length) return;
+    const from = Math.max(0, Math.min(...chosen.map((p) => p.word.start)) - 0.3);
+    const to = Math.min(current.duration, Math.max(...chosen.map((p) => p.word.end)) + 0.3);
+    const scale = width / (to - from), X = (t) => (t - from) * scale;
+    zoomView = { from, to, scale };
+    drawWave(g, 6, width, waveH - 12, from, to, true);
+    chosen.forEach((p, r) => {
+      const c = css(p.row.color), y = waveH + r * laneH, x1 = X(p.word.start), x2 = X(p.word.end);
+      g.strokeStyle = c; g.lineWidth = p.row.reference ? 2 : 1.5;
+      g.setLineDash(p.row.reference ? [5, 4] : []);
+      g.globalAlpha = 0.85;
+      for (const x of [x1, x2]) { g.beginPath(); g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, y + laneH - 4); g.stroke(); }
+      g.setLineDash([]);
+      g.fillStyle = c; g.globalAlpha = p.row.reference ? 0.25 : 0.85;
+      g.fillRect(x1, y + 5, Math.max(2, x2 - x1), laneH - 9);
+      g.globalAlpha = 1;
+    });
+    g.font = `11px ${css("--mono")}`;
+    axis(g, X, from, to, height - 20, width);
+    const t = playhead();
+    if (t !== null && t >= from && t <= to) { g.fillStyle = css("--accent"); g.fillRect(X(t) - 1, 0, 2, height - 22); }
+  }
+  function drawAll() {
+    if (!current) return;
+    $("playAll").textContent = playing ? "Stop" : "Play clip";
+    drawOverview(); drawZoomed();
+  }
+
+  // ---- DOM ------------------------------------------------------------------
+  function renderLabels() {
+    $("labels").style.gridTemplateRows = `${WAVE_H}px repeat(${current.rows.length}, ${LANE_H}px) ${AXIS_H}px`;
+    $("labels").innerHTML = `<div class="hint">waveform</div>` + current.rows.map((row) =>
+      `<div title="${esc(row.label)}"><span class="swatch${row.reference ? " ref" : ""}" style="--c:var(${row.color})"></span>${esc(row.label)}</div>`).join("") + "<div></div>";
+  }
+  function renderBias() { // each row's average start and end against the reference
+    const ref = current.rows.find((r) => r.reference), box = $("bias");
+    box.hidden = !ref || current.rows.length < 2;
+    if (box.hidden) return;
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    const rows = current.rows.filter((r) => r !== ref).map((row) => {
+      const ds = [], de = [];
+      ref.words.forEach((t) => {
+        const w = row.words[wordFor(row, t.start, t.end)];
+        if (w && letters(w.word) === letters(t.word)) { ds.push(w.start - t.start); de.push(w.end - t.end); }
+      });
+      const cells = ds.length ? `<td class="num ${off(mean(ds))}">${ms(mean(ds))}</td><td class="num ${off(mean(de))}">${ms(mean(de))}</td>` : "<td></td><td></td>";
+      return `<tr><td><span class="who"><span class="swatch" style="--c:var(${row.color})"></span>${esc(row.label)}</span></td>${cells}<td class="num">${ds.length} of ${ref.words.length}</td></tr>`;
+    }).join("");
+    box.innerHTML = `<table><thead><tr><th>Average against the reference</th><th>Start</th><th>End</th><th>Words matched</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function renderSelection() {
+    const chosen = picks(), ref = chosen.find((p) => p.row.reference), w0 = selected && selected.row.words[selected.index];
+    const at = (t) => (t + current.offset).toFixed(3) + " s";
+    $("selWord").textContent = w0 ? w0.word : "";
+    $("selWhen").textContent = w0 ? `${selected.row.label}, ${at(w0.start)}` : "";
+    $("deltaHead").textContent = ref ? "Δ start / end vs reference" : "";
+    $("selRows").innerHTML = chosen.map((p, k) => {
+      const w = p.word, delta = ref && p !== ref
+        ? `<span class="${off(w.start - ref.word.start)}">${ms(w.start - ref.word.start)}</span> / <span class="${off(w.end - ref.word.end)}">${ms(w.end - ref.word.end)}</span>` : "";
+      return `<tr><td><span class="who"><span class="swatch${p.row.reference ? " ref" : ""}" style="--c:var(${p.row.color})"></span>${esc(p.row.label)}</span></td>` +
+        `<td class="num">${at(w.start)}</td><td class="num">${at(w.end)}</td><td class="num">${Math.round((w.end - w.start) * 1000)} ms</td><td class="num">${delta}</td>` +
+        `<td><span style="display:inline-flex;gap:6px"><button class="btn" type="button" data-play="${k}" data-part="word" aria-label="Play ${esc(w.word)} as ${esc(p.row.label)} cut it">Word</button>` +
+        `<button class="btn" type="button" data-play="${k}" data-part="end" aria-label="Play the last half second of ${esc(w.word)} as ${esc(p.row.label)} cut it">Last ½ s</button></span></td></tr>`;
+    }).join("");
+  }
+  function render() { renderLabels(); renderBias(); renderSelection(); drawAll(); }
+  function select(row, index, andPlay) {
+    selected = { row, index };
+    renderSelection(); drawAll();
+    if (andPlay) play(row.words[index].start, row.words[index].end);
+  }
+  function defaultSelection() { // a sentence-final word: where the rows tend to differ most
+    const row = current.rows.find((r) => !r.reference && r.words.length) || current.rows.find((r) => r.words.length);
+    if (!row) { selected = null; return; }
+    const final = row.words.findIndex((w) => /[.?!]$/.test(w.word));
+    selected = { row, index: Math.max(0, final) };
+  }
+  function reveal(w) {
+    const sc = $("scroller"), s = pxPerSec();
+    if (w.start * s < sc.scrollLeft || w.end * s > sc.scrollLeft + sc.clientWidth) sc.scrollLeft = ((w.start + w.end) / 2) * s - sc.clientWidth / 2;
+  }
+
+  function renderSpecs() {
+    $("specs").innerHTML = specs.map((s, i) => `<li><span class="swatch" style="--c:var(${s.color})"></span><span class="label">${esc(s.label)}</span>` +
+      `<span class="status ${s.state}">${esc(s.status)}</span><button class="btn" type="button" data-remove="${i}" aria-label="Remove ${esc(s.label)}">Remove</button></li>`).join("");
+    const todo = specs.filter((s) => s.state !== "done").length;
+    $("run").disabled = running || !current || !todo;
+    $("runInfo").textContent = running ? "Running one row at a time…" : !current ? "Pick an audio file." : !specs.length ? "Add a row to compare."
+      : todo ? `Runs ${todo} row${todo > 1 ? "s" : ""} on ${current.duration.toFixed(1)} s of audio.` : "Every row has run on this clip.";
+  }
+  function reset() { // the rows' results belong to one clip and language
+    generation++;
+    for (const s of specs) { s.state = ""; s.status = ""; }
+    if (current) {
+      stop();
+      current.rows = reference ? [referenceRow()] : [];
+      defaultSelection(); render();
+    }
+    renderSpecs();
+  }
+  function makeClip() {
+    const total = source.samples.length / RATE;
+    const from = Math.min(Math.max(0, Number($("from").value) || 0), total), to = Math.min(total, Number($("to").value) || total);
+    if (!(to - from >= 0.1)) { $("clipInfo").textContent = "The clip must be at least 0.1 s long: check From and To."; return; }
+    const samples = source.samples.slice(Math.round(from * RATE), Math.round(to * RATE)), p = peaks(samples);
+    let loudest = 1e-4;
+    for (let i = 0; i < p.lo.length; i++) loudest = Math.max(loudest, p.hi[i], -p.lo[i]);
+    current = { samples, peaks: p, loudest, duration: samples.length / RATE, offset: from, rows: [] };
+    $("clipInfo").textContent = `${source.name}: ${total.toFixed(1)} s; the clip is ${from.toFixed(1)}–${to.toFixed(1)} s (${current.duration.toFixed(1)} s).`;
+    $("timelinePanel").hidden = $("wordPanel").hidden = false;
+    $("zoom").value = 0; $("scroller").scrollLeft = 0;
+    reset();
+  }
+
+  async function transcribe(spec, body, language) {
+    const form = new FormData();
+    form.append("file", body, "clip.wav");
+    form.append("model", spec.model);
+    form.append("response_format", "verbose_json");
+    form.append("timestamp_granularities[]", "word");
+    if (language) form.append("language", language);
+    if (spec.aligner) form.append("aligner", spec.aligner);
+    const response = await fetch("v1/audio/transcriptions", { method: "POST", body: form });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : `${response.status} ${response.statusText}`);
+    if (!result.words) throw new Error("no word times (Whisper needs an aligner and a language)");
+    return result.words;
+  }
+  async function run() { // one row at a time, which is kinder to a shared server
+    const gen = generation, clip = current, language = $("language").value;
+    const body = clip.wav || (clip.wav = wav(clip.samples));
+    running = true;
+    for (const spec of specs.filter((s) => s.state !== "done")) {
+      if (gen !== generation) break;
+      if (!specs.includes(spec)) continue;
+      spec.state = "running"; spec.status = "running…"; renderSpecs();
+      const started = performance.now();
+      let words = null;
+      try { words = await transcribe(spec, body, language); }
+      catch (err) { spec.state = "error"; spec.status = err.message; }
+      if (gen !== generation) break;
+      if (words) {
+        spec.state = "done";
+        spec.status = `${words.length} words in ${((performance.now() - started) / 1000).toFixed(1)} s`;
+        if (specs.includes(spec)) {
+          clip.rows.push({ spec, label: spec.label, color: spec.color, words });
+          clip.rows.sort((a, b) => (a.reference ? -1 : specs.indexOf(a.spec)) - (b.reference ? -1 : specs.indexOf(b.spec)));
+          if (!selected || selected.row.reference) defaultSelection();
+          render();
+        }
+      }
+      renderSpecs();
+    }
+    running = false;
+    renderSpecs();
+  }
+
+  // ---- events ------------------------------------------------------------------
+  $("file").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $("clipInfo").textContent = `Decoding ${file.name}…`;
+    try {
+      source = { name: file.name, samples: await decode(file) };
+    } catch {
+      $("clipInfo").textContent = `This browser could not decode ${file.name}.`;
+      return;
+    }
+    $("from").disabled = $("to").disabled = false;
+    $("from").value = 0; $("to").value = (source.samples.length / RATE).toFixed(2);
+    makeClip();
+  });
+  $("from").addEventListener("change", makeClip);
+  $("to").addEventListener("change", makeClip);
+  $("language").addEventListener("change", reset);
+  $("reference").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    try {
+      reference = file ? parseReference(await file.text()) : null;
+    } catch (err) {
+      reference = null;
+      $("clipInfo").textContent = `Could not read ${file.name}: ${err.message}.`;
+    }
+    if (!current) return;
+    current.rows = current.rows.filter((r) => !r.reference);
+    if (reference) current.rows.unshift(referenceRow());
+    defaultSelection(); render();
+  });
+  $("addRow").addEventListener("click", () => {
+    const model = $("model").value, aligner = $("aligner").value;
+    if (!model || specs.some((s) => s.model === model && s.aligner === aligner)) return;
+    specs.push({ model, aligner, label: aligner ? `${model} + ${aligner}` : model, color: `--c${colours++ % 8}`, state: "", status: "" });
+    renderSpecs();
+  });
+  $("specs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-remove]");
+    if (!b) return;
+    const [spec] = specs.splice(Number(b.dataset.remove), 1);
+    if (current) {
+      current.rows = current.rows.filter((r) => r.spec !== spec);
+      if (selected && selected.row.spec === spec) defaultSelection();
+      render();
+    }
+    renderSpecs();
+  });
+  $("run").addEventListener("click", run);
+  $("zoom").addEventListener("input", () => {
+    const sc = $("scroller"), centre = (sc.scrollLeft + sc.clientWidth / 2) / shownScale;
+    drawOverview();
+    sc.scrollLeft = centre * pxPerSec() - sc.clientWidth / 2;
+  });
+  $("scroller").addEventListener("scroll", () => current && drawOverview());
+  document.querySelector(".seg").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    rate = Number(b.dataset.rate);
+    document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  });
+  $("playAll").addEventListener("click", () => { if (playing) { stop(); drawAll(); } else play(0, current.duration); });
+  $("overview").addEventListener("click", (e) => {
+    const rect = e.currentTarget.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const t = (x + $("scroller").scrollLeft) / pxPerSec();
+    if (y < WAVE_H) return play(t, current.duration);
+    const row = current.rows[Math.floor((y - WAVE_H) / LANE_H)];
+    const i = row ? row.words.findIndex((w) => t >= w.start && t <= w.end) : -1;
+    if (i >= 0) select(row, i, true);
+  });
+  $("overview").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { stop(); drawAll(); return; }
+    if (!selected || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter", " "].includes(e.key)) return;
+    e.preventDefault();
+    const w = selected.row.words[selected.index];
+    let { row, index } = selected;
+    if (e.key === "Enter" || e.key === " ") return play(w.start, w.end);
+    if (e.key === "ArrowLeft") index = Math.max(0, index - 1);
+    if (e.key === "ArrowRight") index = Math.min(row.words.length - 1, index + 1);
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      const rows = current.rows.filter((r) => r === row || r.words.length), r = rows.indexOf(row) + (e.key === "ArrowUp" ? -1 : 1);
+      if (!rows[r]) return;
+      row = rows[r]; index = wordFor(row, w.start, w.end);
+    }
+    select(row, index, true);
+    reveal(row.words[index]);
+  });
+  $("zoomed").addEventListener("click", (e) => {
+    if (zoomView) play(zoomView.from + (e.clientX - e.currentTarget.getBoundingClientRect().left) / zoomView.scale, zoomView.to);
+  });
+  $("selRows").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-play]");
+    if (!b) return;
+    const w = picks()[Number(b.dataset.play)].word;
+    if (b.dataset.part === "word") play(w.start, w.end); else play(Math.max(w.start, w.end - 0.5), w.end);
+  });
+  window.addEventListener("resize", drawAll);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+
+  // ---- pickers, from the API ------------------------------------------------------
+  const option = (value, text = value) => `<option value="${esc(value)}">${esc(text)}</option>`;
+  Promise.all(["v1/models", "v1/aligners"].map((url) => fetch(url).then((r) => (r.ok ? r.json() : Promise.reject(r)))))
+    .then(([models, aligners]) => {
+      $("model").innerHTML = models.data.flatMap((m) => m.quantizations.map((q) => option(`${m.id}:${q}`))).join("");
+      $("aligner").innerHTML += aligners.data.flatMap((a) => a.quantizations.map((q) => option(`${a.id}:${q}`))).join("");
+      const languages = [...new Set([...models.data, ...aligners.data].flatMap((x) => x.language))].sort();
+      $("language").innerHTML += languages.map((code) => option(code)).join("");
+    })
+    .catch(() => { $("runInfo").textContent = "Could not load the models and aligners from this server."; });
+  renderSpecs();
+})();
+</script>
+</body>
+</html>

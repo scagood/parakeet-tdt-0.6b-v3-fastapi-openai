@@ -170,6 +170,7 @@ Key endpoints (unchanged contract):
   `timestamp_granularities[]=segment|word`.
 - `POST /v1/audio/transcriptions/batch` — multiple files in one call.
 - `GET /health`, `GET /healthz`.
+- `GET /compare` — a page comparing models and aligners by ear, with `PARAKEET_COMPARE_UI=true`.
 
 ## Env knobs
 
@@ -203,6 +204,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_WARMUP_TIMEOUT_SEC` | `120`     | warm-up bound; a failed or timed-out warm-up fails startup |
 | `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
 | `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
+| `PARAKEET_COMPARE_UI`      | `false`      | serve the `/compare` page (README, word timestamps)      |
 
 Chunk lengths are per model (`chunk_target_sec` / `chunk_max_sec` in
 `MODEL_CONFIGS`), not configurable: Parakeet v3 chunks at 60/75 s, Whisper and

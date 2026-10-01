@@ -355,6 +355,10 @@ if ALIGN_DEFAULT_LANGUAGE and not LANGUAGE_CODE.fullmatch(ALIGN_DEFAULT_LANGUAGE
 # the aligner to hear how each was said. A request opts in or out with
 # `spoken_numbers=true|false`; this is the answer for requests that don't say.
 SPOKEN_NUMBERS = _env_bool("PARAKEET_SPOKEN_NUMBERS", False)
+# The /compare page: upload a clip and hear where each model and aligner puts
+# every word. Off unless an operator turns it on: each row it runs is a full
+# transcription, and loads the model or aligner it names.
+COMPARE_UI = _env_bool("PARAKEET_COMPARE_UI", False)
 
 MAX_UPLOAD_BYTES = _env_int(
     "PARAKEET_MAX_UPLOAD_BYTES", 256 * 1024 * 1024, minimum=1
