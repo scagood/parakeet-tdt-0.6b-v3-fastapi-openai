@@ -19,6 +19,7 @@ from fastapi import HTTPException, UploadFile, params
 
 from parakeet_service import aligner, routes
 from parakeet_service.config import TARGET_SR
+from parakeet_service.model import get_model
 
 WORDS = ["hello", "world"]
 
@@ -250,6 +251,26 @@ async def test_a_colon_and_a_quantization_field_must_agree(calls, fields, compla
     with pytest.raises(HTTPException) as caught:
         await _transcribe(language="en", **fields)
     assert caught.value.status_code == 400 and complaint in caught.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_cannot_load_is_a_503_naming_it(calls, monkeypatch):
+    def unavailable():  # the first step of a cold load
+        raise RuntimeError("PARAKEET_USE_GPU=true but CUDAExecutionProvider is unavailable")
+
+    async def loading(self, pieces, model_key):  # the workers' up-front load
+        return [get_model(model_key)]
+
+    monkeypatch.setattr("parakeet_service.model._resolve_providers", unavailable)
+    monkeypatch.setattr(_Worker, "submit_many", loading)
+    for request in (_transcribe(model="parakeet-v2:fp16"), _batch("hello", model="parakeet-v2:fp16")):
+        with pytest.raises(HTTPException) as caught:
+            await request
+        assert caught.value.status_code == 503
+        assert caught.value.detail == (
+            "Model 'parakeet-v2:fp16' could not be loaded: "
+            "RuntimeError: PARAKEET_USE_GPU=true but CUDAExecutionProvider is unavailable"
+        )
 
 
 @pytest.mark.asyncio
