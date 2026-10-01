@@ -334,19 +334,23 @@ sit on 20 ms frames and the ends come from the audio.
 
 A request names the aligner, as it names the model: send the form field
 `aligner`, and optionally `aligner_quantization` (else the aligner's default),
-or both at once as `aligner=wav2vec2-base-960h:fp32`.
+or both at once as `aligner=mms-300m-forced-aligner:fp32`.
 There is no default aligner: a request that names none gets Parakeet's times.
 `GET /v1/aligners` lists them, like `GET /v1/models`:
 
 | Aligner | Languages | Error, start / end (English TTS) | License |
 |---|---|---|---|
-| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
-| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
-| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
 | [`mms-300m-forced-aligner`](https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX) | `en` | 37 / 106 ms | **CC-BY-NC-4.0: non-commercial only** |
+| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
+| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
+| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
 
-Each is offered at `int8` (the default) and `fp32`, which is about as accurate
-and 4x the download.
+For English, use `mms-300m-forced-aligner`: it is the most accurate, and on
+real audiobook narration it sounds clearly the best. Its licence is
+non-commercial; for commercial use, `wav2vec2-large-xlsr-53-english` is the
+next best. `wav2vec2-base-960h` is the smallest and fastest, but the least
+accurate. Each is offered at `int8` (the default) and `fp32`, which is about as
+accurate and 4x the download.
 
 ```python
 transcript = client.audio.transcriptions.create(
@@ -355,7 +359,7 @@ transcript = client.audio.transcriptions.create(
   response_format="verbose_json",
   timestamp_granularities=["word"],
   language="en",
-  extra_body={"aligner": "wav2vec2-base-960h"},
+  extra_body={"aligner": "mms-300m-forced-aligner"},  # non-commercial licence
 )
 ```
 
@@ -379,8 +383,8 @@ and the languages each aligns, is set in the
   the language. If a chunk can't be aligned at all, `words` is null; a word the
   aligner can't place sits between its aligned neighbours.
 * **Numbers and symbols** are aligned as spoken by the English aligners
-  (`wav2vec2-base-960h`, `wav2vec2-large-xlsr-53-english`,
-  `mms-300m-forced-aligner`). `omnilingual-ctc-300m` drops numbers in every
+  (`mms-300m-forced-aligner`, `wav2vec2-large-xlsr-53-english`,
+  `wav2vec2-base-960h`). `omnilingual-ctc-300m` drops numbers in every
   language, English included: a number keeps Parakeet's times, and the words
   around it are aligned as usual. As said in English: `42` as "forty two", `2026` as
   "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
@@ -405,11 +409,11 @@ and the languages each aligns, is set in the
 The aligner only runs when the request names one and words are returned (and
 for [spoken numbers](#spoken-numbers)), one request at a time on its own thread
 pool so it never holds up other requests' audio decoding. Each aligner
-downloads on the first request that names it (int8: ~95 MB for
-`wav2vec2-base-960h`, ~320 MB for the others; fp32 is 4x) and runs on CPU,
-adding roughly 2 s per 30 s of audio on a 4-core machine for
-`wav2vec2-base-960h` and 3 s for the others. If a download fails, word times fall back to Parakeet's and the
-load is retried every 5 minutes; `/health` reports each aligner's state per
+downloads on the first request that names it (int8: ~320 MB, or ~95 MB for
+`wav2vec2-base-960h`; fp32 is 4x) and runs on CPU, adding roughly 3 s per 30 s
+of audio on a 4-core machine (2 s for `wav2vec2-base-960h`). If a download
+fails, word times fall back to Parakeet's and the load is retried every 5
+minutes; `/health` reports each aligner's state per
 quantization under `aligner`.
 
 | Variable | Default | |
@@ -441,10 +445,12 @@ ten", "two pounds and ten pence" or "two ten"; `1500` is "fifteen hundred" or
 "one thousand five hundred"; `911` is "nine one one" or "nine eleven" — so each
 number's possible readings are scored against its stretch of the audio by the
 request's [aligner](#word-timestamps) (`aligner=`, as for word times), and the
-one that was said is kept. Likely mishearings of an
-amount are scored too (`£1.10` for "two pounds ten", `€3` for "thirty euros";
-not of a time, date, ordinal or code), and one replaces Parakeet's number only
-when the audio prefers it by a clear margin. Word times follow the spoken words.
+one that was said is kept. The choice was tuned and measured with
+`wav2vec2-base-960h`; the other aligners have not been measured for it yet.
+Likely mishearings of an amount are scored too (`£1.10` for "two pounds ten",
+`€3` for "thirty euros"; not of a time, date, ordinal or code), and one
+replaces Parakeet's number only when the audio prefers it by a clear margin.
+Word times follow the spoken words.
 
 * **Cost.** Almost every number has several readings or a likely mishearing
   (97% of the chunks with a number in our test corpus), so the aligner model
