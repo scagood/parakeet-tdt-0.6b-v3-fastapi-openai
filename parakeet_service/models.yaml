@@ -5,8 +5,8 @@
 # start on a mistake.
 #
 # `languages` holds shared lists as YAML anchors (&name), which entries reference
-# as *name; the service itself only reads `models`. Quote every language code:
-# a bare no (Norwegian) is YAML for false.
+# as *name; the service itself only reads `models` and `aligners`. Quote every
+# language code: a bare no (Norwegian) is YAML for false.
 #
 # One entry per model: what every precision of it shares (family, the
 # onnx-asr model type that runs it, languages, chunk lengths) and, per
@@ -364,3 +364,79 @@ models:
         files:
           encoder_model.onnx: onnx/encoder_model_int8.onnx
           decoder_model_merged.onnx: onnx/decoder_model_merged_int8.onnx
+
+# Word aligners (#32): CTC models (wav2vec2 family, ONNX) that time a
+# transcript's words. A request names one (`aligner`, `aligner_quantization`);
+# there is no default. Shaped like `models`: `aligner_type` fixes the default
+# files (ALIGNER_DEFAULT_FILES in config.py). `normalisers` spell a transcript
+# for the model, in order: english (numbers and letter names said), letters
+# (letters only; numbers keep the model's times), upper, lower.
+aligners:
+  # Apache-2.0.
+  wav2vec2-base-960h:
+    aligner_type: transformers-js
+    languages: *english
+    normalisers: [english, upper]
+    blank: "<pad>"
+    separator: "|"
+    default_quantization: int8
+    quantizations:
+      fp32:
+        repo: onnx-community/wav2vec2-base-960h-ONNX
+        revision: "729c1a6730fb549c20a1c73a3d3f96f11020225e"
+      int8:
+        repo: onnx-community/wav2vec2-base-960h-ONNX
+        revision: "729c1a6730fb549c20a1c73a3d3f96f11020225e"
+        files:
+          model.onnx: onnx/model_int8.onnx
+  # Apache-2.0. ~1600 languages; Parakeet v3's listed.
+  omnilingual-ctc-300m:
+    aligner_type: sherpa-onnx
+    languages: *parakeet-v3
+    normalisers: [letters, lower]
+    blank: "<s>"
+    separator: " "
+    default_quantization: int8
+    quantizations:
+      fp32:
+        repo: OpenVoiceOS/omnilingual-asr-ctc-300m-onnx
+        revision: "bc55e1de19af8a907b0a010d06fc4637a2d5bf0c"
+      int8:
+        repo: OpenVoiceOS/omnilingual-asr-ctc-300m-onnx
+        revision: "bc55e1de19af8a907b0a010d06fc4637a2d5bf0c"
+        files:
+          model.onnx: model.int8.onnx
+  # Apache-2.0 upstream (jonatasgrosman); the export repo states no license.
+  wav2vec2-large-xlsr-53-english:
+    aligner_type: transformers-js
+    languages: *english
+    normalisers: [english, lower]
+    blank: "<pad>"
+    separator: "|"
+    default_quantization: int8
+    quantizations:
+      fp32:
+        repo: Xenova/wav2vec2-large-xlsr-53-english
+        revision: "1069a135be5e7a72b173421acc29111b0763adf8"
+      int8:
+        repo: Xenova/wav2vec2-large-xlsr-53-english
+        revision: "1069a135be5e7a72b173421acc29111b0763adf8"
+        files:
+          model.onnx: onnx/model_int8.onnx
+  # CC-BY-NC-4.0: non-commercial use only. English only: other languages need uroman.
+  mms-300m-forced-aligner:
+    aligner_type: transformers-js
+    languages: *english
+    normalisers: [english, lower]
+    blank: "<blank>"
+    separator: null
+    default_quantization: int8
+    quantizations:
+      fp32:
+        repo: onnx-community/mms-300m-1130-forced-aligner-ONNX
+        revision: "2100fb247d8e43962eef24491597fbeb8b469531"
+      int8:
+        repo: onnx-community/mms-300m-1130-forced-aligner-ONNX
+        revision: "2100fb247d8e43962eef24491597fbeb8b469531"
+        files:
+          model.onnx: onnx/model_int8.onnx

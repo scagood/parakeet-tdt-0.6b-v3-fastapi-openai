@@ -16,9 +16,10 @@ from . import aligner, spoken
 from .audio import load_audio
 from .chunker import auto_chunk, slice_chunks
 from .config import (
-    ALIGN_WORDS,
+    ALIGNER_CONFIGS,
     CHUNK_MIN_SEC,
     CPU_INFO,
+    LANGUAGE_CODE,
     MAX_AUDIO_SECONDS,
     MAX_BATCH_BYTES,
     MAX_BATCH_FILES,
@@ -34,6 +35,7 @@ from .model import loaded_models, variant_key
 
 router = APIRouter()
 _ALLOWED_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
+_GRANULARITIES = {"word", "segment"}  # OpenAI's; segments come with verbose_json anyway
 
 # Parakeet TDT reports token START times only (80 ms encoder frames); its
 # duration head emits at most 4 frames per token, so a token's audio never
@@ -137,6 +139,23 @@ def _validate_model(model: str) -> str:
             detail=f"Unknown model {model!r}. Available models: {sorted(MODEL_CONFIGS)}",
         )
     return normalized
+
+
+def _named(value: str, quantization: Optional[str], field: str, quantization_field: str) -> Tuple[str, Optional[str]]:
+    """A `model` or `aligner` value, "name" or "name:quantization", as (name,
+    quantization): the quantization may come from either form, and must agree
+    when both are sent."""
+    name, colon, suffix = value.partition(":")
+    if not colon:
+        return value, quantization
+    suffix = suffix.strip().lower()
+    if not suffix:
+        raise HTTPException(status_code=400, detail=f"{field} {value!r} has no quantization after ':'")
+    if quantization is not None and quantization.strip().lower() != suffix:
+        raise HTTPException(
+            status_code=400, detail=f"{field} {value!r} says {suffix!r} but {quantization_field} says {quantization!r}"
+        )
+    return name, suffix
 
 
 def _variant(model_name: str, quantization: Optional[str]) -> str:
@@ -432,12 +451,16 @@ def _stitch(
     align: bool = False,
     speak: bool = False,
     language: Optional[str] = None,
-) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Chunk results -> (text, segments, words).
+    aligner_choice: Optional[Tuple[str, str]] = None,
+) -> Tuple[str, List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """Chunk results -> (text, segments, words); words None when a text-only
+    (Whisper) chunk was to be aligned and could not be.
 
-    `align` re-times words with the forced aligner; `speak` says numbers out
-    (PARAKEET_SPOKEN_NUMBERS). Either may run the aligner's model: call it
-    through _stitch_request, which keeps that off the event loop.
+    `align` re-times words with the request's aligner (`aligner_choice`, its
+    name and quantization); `speak` says numbers out (PARAKEET_SPOKEN_NUMBERS),
+    hearing which reading was said through that aligner if there is one. Either
+    may run the aligner's model: call it through _stitch_request, which keeps
+    that off the event loop.
     """
     if len(results) != len(prepared.ranges):
         raise RuntimeError(
@@ -447,6 +470,7 @@ def _stitch(
 
     segments: List[Dict[str, Any]] = []
     words: List[Dict[str, Any]] = []
+    untimed = False
     for (start_sample, end_sample), chunk_wav, result in zip(
         prepared.ranges, prepared.pieces, results
     ):
@@ -493,7 +517,7 @@ def _stitch(
         def chunk(wav: Any = chunk_wav) -> Optional[aligner.ChunkAligner]:
             """The chunk's aligner, made on first use (it loads the model) and shared."""
             if not heard:
-                heard.append(aligner.for_chunk(wav, language))
+                heard.append(aligner.for_chunk(wav, language, *aligner_choice) if aligner_choice else None)
             return heard[0]
 
         said = None
@@ -509,17 +533,19 @@ def _stitch(
 
         # A text-only result (Whisper) has no tokens, so no word spans exist to
         # align. When alignment will run, split the transcript into words with
-        # placeholder spans for the aligner to re-time from the audio.
-        if align and not chunk_words and info["text"]:
+        # placeholder spans for the aligner to re-time from the audio; they are
+        # kept only if it does, never returned as word times of their own.
+        placeholders = align and not chunk_words and bool(info["text"])
+        if placeholders:
             chunk_words = _spread(info["text"].split(), chunk_start, chunk_end)
 
+        spans = None
         if align and chunk_words and (timer := chunk()) is not None:
-            _apply_alignment(
-                chunk_words,
-                timer.spans([w["word"] for w in chunk_words]),
-                chunk_start,
-                chunk_end,
-            )
+            spans = timer.spans([w["word"] for w in chunk_words])
+        if placeholders and not any(spans or ()):
+            untimed = True  # no aligner, no language, or nothing placed
+        elif spans:
+            _apply_alignment(chunk_words, spans, chunk_start, chunk_end)
             # Segment bounds came from the model's estimates; keep them covering
             # the re-timed words so a cue never ends before its last word.
             segment = segments[-1]
@@ -528,11 +554,16 @@ def _stitch(
         words.extend(chunk_words)
 
     full_text = _clean_text(" ".join(item["segment"] for item in segments))
-    return full_text, segments, words
+    # Whisper's word times come only from the aligner: none rather than some.
+    return full_text, segments, None if untimed else words
 
 
 def _needs_aligner(
-    results: Sequence[Any], *, align: bool = False, speak: bool = False, language: Optional[str] = None
+    results: Sequence[Any],
+    *,
+    align: bool = False,
+    speak: bool = False,
+    aligner_choice: Optional[Tuple[str, str]] = None,
 ) -> bool:
     """Whether _stitch, with these flags, runs the aligner's model: for word
     times, or to hear how a number was said (a phrase with something to
@@ -540,7 +571,7 @@ def _needs_aligner(
     readings of a phrase are enough to know it has a choice."""
     if align:
         return True
-    if not (speak and aligner.supports(language)):
+    if not (speak and aligner_choice):
         return False  # for_chunk answers None without loading anything
     try:
         for result in results:
@@ -554,7 +585,7 @@ def _needs_aligner(
 
 async def _stitch_request(
     request: Request, prepared: _PreparedAudio, results: Sequence[Any], **flags: Any
-) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[str, List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
     """_stitch(prepared, results, **flags), off the event loop unless it is
     plain text work (no word times, no digit to say).
 
@@ -571,7 +602,10 @@ async def _stitch_request(
         return stitch()
     loop, state = asyncio.get_running_loop(), request.app.state
     needs = flags.get("align") or await loop.run_in_executor(
-        state.audio_pool, functools.partial(_needs_aligner, results, **flags)
+        state.audio_pool,
+        functools.partial(
+            _needs_aligner, results, speak=flags.get("speak", False), aligner_choice=flags.get("aligner_choice")
+        ),
     )
     return await loop.run_in_executor(state.align_pool if needs else state.audio_pool, stitch)
 
@@ -616,6 +650,33 @@ def retrieve_model(model_id: str):
     return _model_card(name)
 
 
+def _aligner_card(name: str) -> Dict[str, Any]:
+    config = ALIGNER_CONFIGS[name]
+    return {
+        "id": name,
+        "object": "aligner",
+        "created": _MODEL_CREATED,
+        "language": list(config["languages"]),
+        "quantizations": list(config["quantizations"]),
+        "default_quantization": config["default_quantization"],
+        "task": "forced-alignment",
+    }
+
+
+@router.get("/v1/aligners")
+def list_aligners():
+    """The aligners a request may name (`aligner`), as /v1/models lists models."""
+    return {"object": "list", "data": [_aligner_card(name) for name in ALIGNER_CONFIGS]}
+
+
+@router.get("/v1/aligners/{aligner_id:path}")
+def retrieve_aligner(aligner_id: str):
+    name = aligner_id.strip().lower()
+    if name not in ALIGNER_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Aligner {aligner_id!r} not found")
+    return _aligner_card(name)
+
+
 @router.get("/health")
 def health(request: Request):
     ready = bool(getattr(request.app.state, "ready", False))
@@ -636,16 +697,54 @@ def healthz(request: Request):
     return {"status": "ok"}
 
 
-def _whisper_english(model_name: str, language: Optional[str]) -> bool:
-    """Whether a Whisper request may use the (English-only) aligner for word
-    times. Whisper has no native word timing, so we require English to be
-    *known* — an English-only model, or an explicit English `language` —
-    never inferred from a multilingual model's auto-detection, which could be
-    any language and would mis-time the audio."""
-    if MODEL_CONFIGS[model_name]["languages"] == ["en"]:
-        return True
-    lang = (language or "").strip()
-    return bool(lang) and aligner.language_code(lang) == "en"
+def _validate_language(language: Optional[str]) -> None:
+    """A request's `language` is a bare ISO 639-1 code, or empty / "auto"
+    (the default); anything else is a 400, whether or not it would be used."""
+    code = (language or "").strip()
+    if code not in ("", "auto") and not LANGUAGE_CODE.fullmatch(code):
+        raise HTTPException(
+            status_code=400, detail=f"language must be an ISO 639-1 code, e.g. 'en'; got {language!r}"
+        )
+
+
+def _validate_aligner(name: Optional[str], quantization: Optional[str]) -> Optional[Tuple[str, str]]:
+    """The request's aligner as (name, quantization), or None if it names none:
+    in the catalog, at one of its quantizations (else its default_quantization)."""
+    if name is None:
+        if quantization is not None:
+            raise HTTPException(status_code=400, detail="aligner_quantization needs an aligner")
+        return None
+    normalized = name.strip().lower()
+    if normalized not in ALIGNER_CONFIGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown aligner {name!r}. Available aligners: {sorted(ALIGNER_CONFIGS)}",
+        )
+    spec = ALIGNER_CONFIGS[normalized]
+    quant = (quantization or spec["default_quantization"]).strip().lower()
+    if quant not in spec["quantizations"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Aligner {normalized!r} has no {quant!r} quantization. Available: {list(spec['quantizations'])}",
+        )
+    return normalized, quant
+
+
+def _validate_aligner_language(name: str, language: Optional[str]) -> None:
+    """For a word request: the aligner must align its language, if it has one
+    (none, with PARAKEET_ALIGN_DEFAULT_LANGUAGE empty: nothing is aligned)."""
+    code = aligner.language_code(language)
+    if code and not aligner.aligns(name, language):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Aligner {name!r} does not align {code!r}; it aligns {list(ALIGNER_CONFIGS[name]['languages'])}",
+        )
+
+
+def _transcript_language(model_name: str, language: Optional[str]) -> Optional[str]:
+    """The transcript's language, for aligning and saying numbers: an
+    English-only model's words are English, whatever `language` says."""
+    return "en" if MODEL_CONFIGS[model_name]["languages"] == ["en"] else language
 
 
 def _speaks(spoken_numbers: Optional[bool], language: Optional[str]) -> bool:
@@ -671,10 +770,12 @@ async def transcribe(
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
-    align_words: Optional[bool] = Form(None),
     spoken_numbers: Optional[bool] = Form(None),
+    aligner_name: Optional[str] = Form(None, alias="aligner"),
+    aligner_quantization: Optional[str] = Form(None),
 ):
     del prompt, temperature  # accepted for OpenAI client compatibility
+    model, quantization = _named(model, quantization, "model", "quantization")
     model_name = _validate_model(model)
     model_key = _variant(model_name, quantization)
     family = _family(model_name)
@@ -683,16 +784,30 @@ async def transcribe(
     granularities = set(timestamp_granularities or []) | set(
         timestamp_granularities_plain or []
     )
-    align = ALIGN_WORDS if align_words is None else align_words
-    speak = _speaks(spoken_numbers, language)
+    if unknown := granularities - _GRANULARITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"timestamp_granularities takes {sorted(_GRANULARITIES)}; got {sorted(unknown)}",
+        )
+    _validate_language(language)
+    heard = _transcript_language(model_name, language)
+    # Naming an aligner is asking for aligned word times; there is no default.
+    if aligner_name is not None:
+        aligner_name, aligner_quantization = _named(
+            aligner_name, aligner_quantization, "aligner", "aligner_quantization"
+        )
+    choice = _validate_aligner(aligner_name, aligner_quantization)
+    speak = _speaks(spoken_numbers, heard)
     # Word timestamps: Parakeet emits them from its TDT tokens. Whisper returns
     # text only, so its words come purely from forced-aligning the transcript,
-    # and only when the language is known English (the aligner is English-only) —
-    # never guessed for a multilingual Whisper request.
+    # and only when the request names an aligner and the language is known —
+    # never auto-detected for a multilingual Whisper request.
     want_words = output_format == "verbose_json" and "word" in granularities and (
         family == "parakeet"
-        or (family == "whisper" and align and _whisper_english(model_name, language))
+        or (family == "whisper" and choice is not None and (heard or "").strip() not in ("", "auto"))
     )
+    if want_words and choice is not None:
+        _validate_aligner_language(choice[0], heard)
     raw = await _read_upload_limited(file)
 
     started = time.perf_counter()
@@ -708,9 +823,10 @@ async def transcribe(
         request,
         prepared,
         results,
-        align=want_words and align and aligner.supports(language),
+        align=want_words and choice is not None,
         speak=speak,
-        language=language,
+        language=heard,
+        aligner_choice=choice,
     )
     stitch_ms = (time.perf_counter() - stitch_started) * 1000
 
@@ -767,6 +883,8 @@ async def transcribe_batch(
     model: str = Form(...),
     quantization: Optional[str] = Form(None),
     spoken_numbers: Optional[bool] = Form(None),
+    aligner_name: Optional[str] = Form(None, alias="aligner"),
+    aligner_quantization: Optional[str] = Form(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -775,8 +893,14 @@ async def transcribe_batch(
             status_code=413,
             detail=f"Batch contains {len(files)} files; limit is {MAX_BATCH_FILES}",
         )
+    model, quantization = _named(model, quantization, "model", "quantization")
     model_name = _validate_model(model)
     model_key = _variant(model_name, quantization)
+    if aligner_name is not None:
+        aligner_name, aligner_quantization = _named(
+            aligner_name, aligner_quantization, "aligner", "aligner_quantization"
+        )
+    choice = _validate_aligner(aligner_name, aligner_quantization)  # it only hears numbers here
     target_sec, max_sec, min_sec = _chunk_bounds(model_name)
     filenames = [upload.filename or "unnamed" for upload in files]
 
@@ -833,15 +957,19 @@ async def transcribe_batch(
         raise HTTPException(status_code=503, detail="Model is not ready")
     flat_results = await worker.submit_many(flattened, model_key)
 
-    # The batch endpoint takes no `language`: the default decides.
-    speak = _speaks(spoken_numbers, None)
+    # The batch endpoint takes no `language`: the default decides, unless the
+    # model is English-only.
+    heard = _transcript_language(model_name, None)
+    speak = _speaks(spoken_numbers, heard)
     cursor = 0
     response_items = []
     for filename, prepared in zip(filenames, prepared_files):
         count = len(prepared.pieces)
         item_results = flat_results[cursor : cursor + count]
         cursor += count
-        text, _segments, _words = await _stitch_request(request, prepared, item_results, speak=speak)
+        text, _segments, _words = await _stitch_request(
+            request, prepared, item_results, speak=speak, language=heard, aligner_choice=choice
+        )
         response_items.append(
             {"filename": filename, "text": text, "duration": prepared.duration}
         )

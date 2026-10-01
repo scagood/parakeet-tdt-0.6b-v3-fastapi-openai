@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-from fastapi import UploadFile, params
+from fastapi import HTTPException, UploadFile, params
 
 from parakeet_service import aligner, routes
 from parakeet_service.config import TARGET_SR
@@ -48,13 +48,14 @@ def calls(monkeypatch):
     recorded = []
 
     class FakeChunk:
-        def __init__(self, language):
-            self.language = language
+        def __init__(self, language, aligner):
+            self.language, self.aligner = language, aligner
 
         def spans(self, words):
-            recorded.append(
-                {"words": list(words), "language": self.language, "thread": threading.current_thread().name}
-            )
+            recorded.append({
+                "words": list(words), "language": self.language, "aligner": self.aligner,
+                "thread": threading.current_thread().name,
+            })
             return [(0.1 + 1.5 * i, 0.4 + 1.5 * i) for i in range(len(words))]
 
         def scores(self, options, _start, _end):
@@ -64,14 +65,13 @@ def calls(monkeypatch):
         def best(self, _options, _start, _end):
             return 0
 
-    def fake_for_chunk(_wav, language):
-        return FakeChunk(language) if aligner.supports(language) else None
+    def fake_for_chunk(_wav, language, name=None, quantization=None):
+        return FakeChunk(language, (name, quantization)) if name and aligner.aligns(name, language) else None
 
     async def fake_prepare(_request, raw, *_bounds):
         return _prepared(raw)
 
     monkeypatch.setattr(aligner, "for_chunk", fake_for_chunk)
-    monkeypatch.setattr(routes, "ALIGN_WORDS", False)
     monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "en")
     monkeypatch.setattr(routes, "_prepare_in_pool", fake_prepare)
     monkeypatch.setattr(routes, "_prepare_audio", _prepared)
@@ -116,24 +116,28 @@ async def _transcribe(
     granularity="word",
     language=None,
     text="hello world",
-    align_words=True,
+    aligner_name=None,
+    aligner_quantization=None,
     spoken_numbers=None,
+    model="parakeet-v3",
+    quantization=None,
 ):
     state = _state()
     try:
         response = await routes.transcribe(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             file=UploadFile(io.BytesIO(text.encode()), filename="a.wav"),
-            model="parakeet-v3",
-            quantization=None,
+            model=model,
+            quantization=quantization,
             response_format=response_format,
             timestamp_granularities=[granularity] if granularity else None,
             timestamp_granularities_plain=None,
             language=language,
             prompt=None,
             temperature=None,
-            align_words=align_words,
             spoken_numbers=spoken_numbers,
+            aligner_name=aligner_name,
+            aligner_quantization=aligner_quantization,
         )
     finally:
         state.audio_pool.shutdown()
@@ -141,15 +145,17 @@ async def _transcribe(
     return json.loads(response.body) if response_format.endswith("json") else response.body.decode()
 
 
-async def _batch(*texts, spoken_numbers=None):
+async def _batch(*texts, spoken_numbers=None, aligner_name=None, aligner_quantization=None, model="parakeet-v3"):
     state = _state()
     try:
         body = await routes.transcribe_batch(
             request=SimpleNamespace(app=SimpleNamespace(state=state)),
             files=[UploadFile(io.BytesIO(text.encode()), filename=f"{i}.wav") for i, text in enumerate(texts)],
-            model="parakeet-v3",
+            model=model,
             quantization=None,
             spoken_numbers=spoken_numbers,
+            aligner_name=aligner_name,
+            aligner_quantization=aligner_quantization,
         )
     finally:
         state.audio_pool.shutdown()
@@ -157,33 +163,134 @@ async def _batch(*texts, spoken_numbers=None):
     return [item["text"] for item in body["results"]]
 
 
+BASE = "wav2vec2-base-960h"
+
+
 @pytest.mark.asyncio
 async def test_word_request_is_aligned_on_the_align_pool(calls):
-    body = await _transcribe(language="en-US")
+    body = await _transcribe(language="en", aligner_name=BASE)
     assert [c["words"] for c in calls] == [WORDS]
-    assert calls[0]["language"] == "en-US"
+    assert calls[0]["language"] == "en"
+    assert calls[0]["aligner"] == (BASE, "int8")  # its default_quantization
     assert calls[0]["thread"].startswith("align")  # not the audio pool, not the loop
     assert [(w["word"], w["start"], w["end"]) for w in body["words"]] == [
         ("hello", 0.1, 0.4),
         ("world", 1.6, 1.9),
     ]
-    assert body["language"] == "en-US"
+    assert body["language"] == "en"
     # the segment was widened to cover the re-timed last word
     assert body["segments"][0]["end"] >= body["words"][-1]["end"]
 
 
 @pytest.mark.asyncio
-async def test_unsupported_language_keeps_model_times(calls):
-    body = await _transcribe(language="fr")
+@pytest.mark.parametrize("language", ["en", "ja"])
+async def test_without_an_aligner_words_keep_model_times(calls, language):
+    body = await _transcribe(language=language)
     assert calls == []
     assert body["words"][0]["start"] == 0.0 and body["words"][1]["start"] == 0.8
-    assert body["language"] == "fr"
+    assert body["language"] == language
+
+
+@pytest.mark.asyncio
+async def test_with_no_default_language_an_aligner_needs_language(calls, monkeypatch):
+    # PARAKEET_ALIGN_DEFAULT_LANGUAGE empty: align only when `language` is sent, never a 400
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    body = await _transcribe(language=None, aligner_name=BASE)
+    assert calls == [] and body["words"][1]["start"] == 0.8
+    assert await _batch("hello", aligner_name=BASE) == ["hello"]
+    await _transcribe(language="en", aligner_name=BASE)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["en-GB", "en_GB", "EN", "English", "de-DE"])
+async def test_language_is_a_bare_iso_code_on_every_request(calls, language):
+    for response_format in ("json", "verbose_json"):  # whether or not anything uses it
+        with pytest.raises(HTTPException) as caught:
+            await _transcribe(response_format=response_format, language=language)
+        assert caught.value.status_code == 400 and "ISO 639-1" in caught.value.detail
+
+
+@pytest.mark.asyncio
+async def test_the_aligners_language_is_checked_only_for_word_times(calls):
+    # json: the aligner would never run for French (spoken numbers are English)
+    body = await _transcribe(response_format="json", language="fr", aligner_name=BASE)
+    assert body["text"] == "hello world" and calls == []
+    with pytest.raises(HTTPException, match="does not align 'fr'"):
+        await _transcribe(language="fr", aligner_name=BASE)
+
+
+@pytest.mark.asyncio
+async def test_model_and_aligner_take_a_quantization_after_a_colon(calls, monkeypatch):
+    keys = []
+    submit = _Worker.submit_many
+
+    async def recording(self, pieces, model_key):
+        keys.append(model_key)
+        return await submit(self, pieces, model_key)
+
+    monkeypatch.setattr(_Worker, "submit_many", recording)
+    await _transcribe(model="parakeet-v3:int8", language="en", aligner_name=f"{BASE}:fp32")
+    assert keys == ["parakeet-v3:int8"]
+    assert calls[0]["aligner"] == (BASE, "fp32")
+    assert await _batch("hello", model="parakeet-v3:int8", aligner_name=f"{BASE}:fp32") == ["hello"]
+    assert keys[-1] == "parakeet-v3:int8"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "complaint"),
+    [
+        ({"model": "parakeet-v3:fp16", "quantization": "int8"}, "quantization says 'int8'"),
+        ({"aligner_name": f"{BASE}:fp32", "aligner_quantization": "int8"}, "aligner_quantization says 'int8'"),
+        ({"aligner_name": f"{BASE}:"}, "no quantization"),
+    ],
+)
+async def test_a_colon_and_a_quantization_field_must_agree(calls, fields, complaint):
+    with pytest.raises(HTTPException) as caught:
+        await _transcribe(language="en", **fields)
+    assert caught.value.status_code == 400 and complaint in caught.value.detail
+
+
+@pytest.mark.asyncio
+async def test_parakeet_v3_languages_are_aligned_in_their_own_language(calls):
+    body = await _transcribe(language="fr", aligner_name="Omnilingual-CTC-300M")
+    assert [(c["language"], c["aligner"]) for c in calls] == [("fr", ("omnilingual-ctc-300m", "int8"))]
+    assert body["words"][1]["start"] == 1.6
 
 
 @pytest.mark.asyncio
 async def test_missing_language_reports_auto_and_uses_the_default(calls):
-    body = await _transcribe(language=None)
+    body = await _transcribe(language=None, aligner_name=BASE)
     assert len(calls) == 1 and body["language"] == "auto"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("aligner_name", "quantization", "language", "complaint"),
+    [
+        ("wav2vec3", None, "en", "Unknown aligner 'wav2vec3'"),
+        (BASE, "fp8", "en", "no 'fp8' quantization"),
+        (BASE, None, "fr", "does not align 'fr'"),
+        (None, "int8", "en", "aligner_quantization needs an aligner"),
+    ],
+)
+async def test_a_bad_aligner_is_a_400_naming_the_choices(calls, aligner_name, quantization, language, complaint):
+    with pytest.raises(HTTPException) as caught:
+        await _transcribe(language=language, aligner_name=aligner_name, aligner_quantization=quantization)
+    assert caught.value.status_code == 400 and complaint in caught.value.detail
+    if language == "en":  # the batch endpoint takes no `language`: the default, English
+        with pytest.raises(HTTPException, match="400"):
+            await _batch("hello", aligner_name=aligner_name, aligner_quantization=quantization)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_format", ["verbose_json", "json"])
+@pytest.mark.parametrize("granularity", ["char", "Word", "words"])
+async def test_an_unknown_granularity_is_a_400(calls, response_format, granularity):
+    with pytest.raises(HTTPException) as caught:
+        await _transcribe(response_format=response_format, granularity=granularity)
+    assert caught.value.status_code == 400 and repr(granularity) in caught.value.detail
 
 
 @pytest.mark.asyncio
@@ -192,44 +299,45 @@ async def test_missing_language_reports_auto_and_uses_the_default(calls):
     [("verbose_json", None), ("verbose_json", "segment"), ("json", "word"), ("srt", "word")],
 )
 async def test_alignment_only_runs_when_words_are_returned(calls, stitched, response_format, granularity):
-    await _transcribe(response_format=response_format, granularity=granularity)
+    await _transcribe(response_format=response_format, granularity=granularity, aligner_name=BASE)
     assert calls == []
     assert stitched == ["inline"]  # nothing to align: no queue
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("server_default", "align_words", "aligned"),
-    [(False, None, False), (False, True, True), (True, None, True), (True, False, False)],
-)
-async def test_the_request_opts_in_or_out_else_the_server_default(
-    calls, monkeypatch, server_default, align_words, aligned
-):
-    monkeypatch.setattr(routes, "ALIGN_WORDS", server_default)
-    body = await _transcribe(align_words=align_words)
-    assert bool(calls) == aligned
-    assert (body["words"][1]["start"] == 1.6) == aligned  # else Parakeet's 0.8
-
-
-@pytest.mark.parametrize(
-    ("handler", "name"),
+    ("handler", "name", "annotation"),
     [
-        (routes.transcribe, "align_words"),
-        (routes.transcribe, "spoken_numbers"),
-        (routes.transcribe_batch, "spoken_numbers"),
+        (routes.transcribe, "spoken_numbers", ("Optional[bool]", "bool | None")),
+        (routes.transcribe_batch, "spoken_numbers", ("Optional[bool]", "bool | None")),
+        (routes.transcribe, "aligner_name", ("Optional[str]", "str | None")),
+        (routes.transcribe, "aligner_quantization", ("Optional[str]", "str | None")),
+        (routes.transcribe_batch, "aligner_name", ("Optional[str]", "str | None")),
+        (routes.transcribe_batch, "aligner_quantization", ("Optional[str]", "str | None")),
     ],
 )
-def test_the_switches_are_optional_form_fields(handler, name):
+def test_the_switches_are_optional_form_fields(handler, name, annotation):
     # the handlers are called directly here, so pin what FastAPI will parse
     field = inspect.signature(handler).parameters[name]
     assert isinstance(field.default, params.Form) and field.default.default is None
-    assert field.annotation in ("Optional[bool]", "bool | None")
+    assert field.annotation in annotation
+    assert "align_words" not in inspect.signature(handler).parameters  # an aligner is named, or none
+
+
+def test_aligners_are_listed_like_models():
+    listing = routes.list_aligners()
+    assert [card["id"] for card in listing["data"]] == list(routes.ALIGNER_CONFIGS)
+    card = routes.retrieve_aligner("Omnilingual-CTC-300M")
+    assert card["object"] == "aligner" and card["default_quantization"] in card["quantizations"]
+    assert "fr" in card["language"]
+    with pytest.raises(HTTPException) as caught:
+        routes.retrieve_aligner("nope")
+    assert caught.value.status_code == 404
 
 
 def test_health_reports_aligner_state(monkeypatch):
-    monkeypatch.setattr(aligner, "status", lambda: {"en": "failed"})
+    monkeypatch.setattr(aligner, "status", lambda: {"wav2vec2-base-960h:int8": "failed"})
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ready=True)))
-    assert routes.health(request)["aligner"] == {"en": "failed"}
+    assert routes.health(request)["aligner"] == {"wav2vec2-base-960h:int8": "failed"}
 
 
 # --------------------------------------------------------------------------- #
@@ -263,10 +371,7 @@ async def test_the_request_says_numbers_or_not_else_the_server_default(
     [
         (None, "It cost five dollars today."),  # PARAKEET_ALIGN_DEFAULT_LANGUAGE
         ("en", "It cost five dollars today."),
-        ("en-GB", "It cost five dollars today."),
-        ("English", "It cost five dollars today."),
         ("fr", "It cost $5 today."),
-        ("de-DE", "It cost $5 today."),
     ],
 )
 async def test_spoken_numbers_are_english_only(calls, speak, language, text):
@@ -304,6 +409,14 @@ async def test_spoken_numbers_reach_every_response_format(calls, speak, response
 
 
 @pytest.mark.asyncio
+async def test_batch_treats_an_english_only_model_as_english(calls, speak, monkeypatch):
+    # as single requests do: parakeet-v2's numbers are English whatever the default
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    assert await _batch("It cost $5.", model="parakeet-v2") == ["It cost five dollars."]
+    assert await _batch("It cost $5.") == ["It cost $5."]  # parakeet-v3: the (empty) default
+
+
+@pytest.mark.asyncio
 async def test_batch_says_numbers_too(calls, speak):
     texts = await _batch("It cost $5 today.", "No numbers here.")
     assert texts == ["It cost five dollars today.", "No numbers here."]
@@ -321,11 +434,19 @@ async def test_batch_says_numbers_too(calls, speak):
     ],
 )
 async def test_spoken_numbers_queue_on_the_align_pool_only_to_hear_one(calls, stitched, speak, text, pool):
-    await _transcribe(response_format="json", text=text)
-    await _batch(text)
+    await _transcribe(response_format="json", text=text, aligner_name=BASE)
+    await _batch(text, aligner_name=BASE)
     assert stitched == [pool, pool]
     assert all(call["thread"].startswith("align") for call in calls)
     assert bool(calls) == (pool == "align")
+
+
+@pytest.mark.asyncio
+async def test_without_an_aligner_spoken_numbers_never_queue_to_hear(calls, stitched, speak):
+    text = "That'll be £2.10 please."
+    assert (await _transcribe(response_format="json", text=text))["text"] == "That'll be two pounds ten please."
+    assert await _batch(text) == ["That'll be two pounds ten please."]
+    assert calls == [] and stitched == ["audio", "audio"]
 
 
 @pytest.mark.asyncio
@@ -360,7 +481,7 @@ async def test_a_spoken_numbers_bug_is_never_a_500(calls, speak, monkeypatch, ca
 
 
 # --- Whisper word alignment (Whisper returns text only; words come from the
-# --- English aligner, and only when English is known) --------------------------
+# --- request's aligner, and only when the language is known) --------------------
 
 class _WhisperWorker:
     """Whisper returns a bare transcript string per chunk: no tokens."""
@@ -369,7 +490,7 @@ class _WhisperWorker:
         return list(pieces)
 
 
-async def _transcribe_whisper(model, *, language=None, align_words=True, text="hello world"):
+async def _transcribe_whisper(model, *, language=None, aligner_name=BASE, text="hello world"):
     state = _state()
     state.worker = _WhisperWorker()
     try:
@@ -384,8 +505,9 @@ async def _transcribe_whisper(model, *, language=None, align_words=True, text="h
             language=language,
             prompt=None,
             temperature=None,
-            align_words=align_words,
             spoken_numbers=None,
+            aligner_name=aligner_name,
+            aligner_quantization=None,
         )
     finally:
         state.audio_pool.shutdown()
@@ -405,9 +527,52 @@ async def test_whisper_english_transcript_is_split_and_aligned(calls):
 
 
 @pytest.mark.asyncio
+async def test_whisper_aligns_any_language_the_aligner_knows(calls):
+    body = await _transcribe_whisper("whisper-base", language="de", aligner_name="omnilingual-ctc-300m")
+    assert [c["language"] for c in calls] == ["de"]
+    assert body["words"] is not None
+
+
+@pytest.mark.asyncio
+async def test_whisper_in_a_language_no_aligner_has_returns_no_words(calls):
+    body = await _transcribe_whisper("whisper-base", language="ja", aligner_name=None)
+    assert calls == []
+    assert body["words"] is None
+
+
+@pytest.mark.asyncio
 async def test_whisper_multilingual_without_language_returns_no_words(calls):
     # Auto-detect could be any language; never align a multilingual model blindly.
     body = await _transcribe_whisper("whisper-base", language=None)
+    assert calls == []
+    assert body["words"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("why", ["the aligner failed to load", "nothing was placed"])
+async def test_whisper_never_returns_placeholder_word_times(calls, monkeypatch, why):
+    # Whisper has no word times: without the aligner's, it has no words at all.
+    if why == "the aligner failed to load":
+        monkeypatch.setattr(aligner, "for_chunk", lambda *_: None)
+    else:
+        monkeypatch.setattr(aligner, "for_chunk", lambda *_: SimpleNamespace(spans=lambda _words: None))
+    body = await _transcribe_whisper("whisper-base.en", text="hello big wide world")
+    assert body["words"] is None
+    assert body["text"] == "hello big wide world"
+
+
+@pytest.mark.asyncio
+async def test_an_english_only_model_is_aligned_as_english(calls, monkeypatch):
+    # No `language` and no default: an .en model's words are English all the same.
+    monkeypatch.setattr(aligner, "ALIGN_DEFAULT_LANGUAGE", "")
+    body = await _transcribe_whisper("whisper-base.en", language=None)
+    assert [c["language"] for c in calls] == ["en"]
+    assert [(w["word"], w["start"]) for w in body["words"]] == [("hello", 0.1), ("world", 1.6)]
+
+
+@pytest.mark.asyncio
+async def test_whisper_auto_language_is_not_a_known_language(calls):
+    body = await _transcribe_whisper("whisper-base", language="auto")
     assert calls == []
     assert body["words"] is None
 
@@ -421,8 +586,8 @@ async def test_whisper_english_only_model_aligns_without_language(calls):
 
 
 @pytest.mark.asyncio
-async def test_whisper_words_off_when_align_disabled(calls):
-    # Whisper has no native word times, so align_words=false means no words.
-    body = await _transcribe_whisper("whisper-base", language="en", align_words=False)
+async def test_whisper_words_need_an_aligner(calls):
+    # Whisper has no native word times, so without an aligner there are no words.
+    body = await _transcribe_whisper("whisper-base", language="en", aligner_name=None)
     assert calls == []
     assert body["words"] is None

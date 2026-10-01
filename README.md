@@ -231,6 +231,9 @@ print(transcript)
 Every request must name its `model`; there is no server default, and a request
 without one is rejected with 422. Precision is a separate, optional
 `quantization` field: `fp32` (the default, on any hardware), `fp16` or `int8`.
+It can also follow the name after a colon: `model=parakeet-v3:fp16` is the same
+as `model=parakeet-v3` with `quantization=fp16`; if a request sends both, they
+must agree.
 `GET /v1/models` lists every model with the languages it transcribes and the
 quantizations it offers.
 
@@ -281,7 +284,11 @@ transcript = client.audio.transcriptions.create(
 The models above are defined in [`parakeet_service/models.yaml`](parakeet_service/models.yaml):
 per model its family, languages and chunk lengths, and per quantization a
 Hugging Face repo, a pinned commit and, where they differ from the fp32
-defaults, the files to load. To serve a
+defaults, the files to load. Its `aligners` section lists the
+[word aligners](#word-timestamps) the same way: per aligner its export layout,
+the languages it aligns, the steps that spell a transcript for it, its CTC
+tokens and default quantization, and per quantization a repo, a pinned commit
+and the files that differ (`aligners: {}` serves none). To serve a
 different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
 another file of the same shape. It **replaces** the built-in catalog, so copy
 the built-in file and edit it. The file is checked at startup and the service
@@ -314,19 +321,36 @@ volumes:
 
 `response_format` accepts `json` (default), `text`, `srt`, `vtt` and
 `verbose_json`. `verbose_json` returns segments, and word timestamps as well
-when `timestamp_granularities[]=word` is sent.
+when `timestamp_granularities[]=word` is sent. `timestamp_granularities[]`
+takes `word` and `segment` (segments come either way); anything else is a 400.
 
 #### Word timestamps
 
-For English, word times can come from a forced aligner rather than from
-Parakeet. Parakeet decides the words, then [wav2vec2-base-960h](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX)
-finds where each one starts and ends, WhisperX-style but on ONNX Runtime with
-no PyTorch. Parakeet's own word times sit on 80 ms frames and their ends are
-estimated; aligned times sit on 20 ms frames and the ends come from the audio.
+Word times can come from a forced aligner rather than from Parakeet. Parakeet
+decides the words, then a character-level CTC model finds where each one
+starts and ends, WhisperX-style but on ONNX Runtime with no PyTorch. Parakeet's
+own word times sit on 80 ms frames and their ends are estimated; aligned times
+sit on 20 ms frames and the ends come from the audio.
 
-It is opt-in: send the form field `align_words=true` (or `false` to opt out
-where the server default is on). Requests that don't say get
-`PARAKEET_ALIGN_WORDS`, off unless you change it.
+A request names the aligner, as it names the model: send the form field
+`aligner`, and optionally `aligner_quantization` (else the aligner's default),
+or both at once as `aligner=mms-300m-forced-aligner:fp32`.
+There is no default aligner: a request that names none gets Parakeet's times.
+`GET /v1/aligners` lists them, like `GET /v1/models`:
+
+| Aligner | Languages | Error, start / end (English TTS) | License |
+|---|---|---|---|
+| [`mms-300m-forced-aligner`](https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX) | `en` | 37 / 106 ms | **CC-BY-NC-4.0: non-commercial only** |
+| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
+| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
+| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
+
+For English, use `mms-300m-forced-aligner`: it is the most accurate, and on
+real audiobook narration it sounds clearly the best. Its licence is
+non-commercial; for commercial use, `wav2vec2-large-xlsr-53-english` is the
+next best. `wav2vec2-base-960h` is the smallest and fastest, but the least
+accurate. Each is offered at `int8` (the default) and `fp32`, which is about as
+accurate and 4x the download.
 
 ```python
 transcript = client.audio.transcriptions.create(
@@ -335,18 +359,34 @@ transcript = client.audio.transcriptions.create(
   response_format="verbose_json",
   timestamp_granularities=["word"],
   language="en",
-  extra_body={"align_words": True},
+  extra_body={"aligner": "mms-300m-forced-aligner"},  # non-commercial licence
 )
 ```
 
-* **Language.** `language` accepts `en`, `en-US`, `en_GB` or `english`. A
+An unknown aligner or quantization, or an aligner that does not align the
+request's language, is a 400 naming what is available. Which aligners exist,
+and the languages each aligns, is set in the
+[model catalog](#your-own-model-catalog).
+
+* **Language.** `language` is a bare ISO 639-1 code (`en`, `fr`), or empty or
+  `auto` for the default; anything else (`en-US`, `EN`, `English`) is a 400 on
+  every request. For word timestamps it must be one the aligner aligns. A
   request without `language` (or with `auto`) is aligned as
   `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it: nothing
-  detects the language. A chunk whose words are mostly in another alphabet
-  (Cyrillic, Greek, ...) keeps Parakeet's times, but Latin-script languages
-  sent without `language` are aligned as English — set the default empty if you
-  serve them. Other languages keep Parakeet's times.
-* **Numbers and symbols** are aligned as spoken: `42` as "forty two", `2026` as
+  detects the language. An English-only model's words (`parakeet-v2`,
+  `whisper-*.en`) are aligned as English whatever `language` says. A chunk
+  whose words are mostly in another alphabet than the aligner's (Cyrillic,
+  Greek, ...) keeps Parakeet's times, but other Latin-script languages sent
+  without `language` are aligned as English — send `language`. Whisper has no
+  word times of its own, so it returns words only when the request names an
+  aligner, and a multilingual Whisper model only when the request also names
+  the language. If a chunk can't be aligned at all, `words` is null; a word the
+  aligner can't place sits between its aligned neighbours.
+* **Numbers and symbols** are aligned as spoken by the English aligners
+  (`mms-300m-forced-aligner`, `wav2vec2-large-xlsr-53-english`,
+  `wav2vec2-base-960h`). `omnilingual-ctc-300m` drops numbers in every
+  language, English included: a number keeps Parakeet's times, and the words
+  around it are aligned as usual. As said in English: `42` as "forty two", `2026` as
   "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
   `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
   folded (`café`). A number is read together with the words that change how it
@@ -366,18 +406,19 @@ transcript = client.audio.transcriptions.create(
   it takes the pause, but a long one invented in the middle of continuous
   speech pushes its neighbours aside.
 
-The aligner only runs when alignment is on and words are returned (and for
-[spoken numbers](#spoken-numbers)), one request at a time on its own thread
-pool so it never holds up other requests' audio decoding. It downloads (~95 MB)
-on the first such request and runs on CPU, adding roughly 2 s per 30 s of audio
-on a 4-core machine. If the download fails, word times fall back to Parakeet's
-and the load is retried every 5 minutes; `/health` reports the aligner's state
-under `aligner`.
+The aligner only runs when the request names one and words are returned (and
+for [spoken numbers](#spoken-numbers)), one request at a time on its own thread
+pool so it never holds up other requests' audio decoding. Each aligner
+downloads on the first request that names it (int8: ~320 MB, or ~95 MB for
+`wav2vec2-base-960h`; fp32 is 4x) and runs on CPU, adding roughly 3 s per 30 s
+of audio on a 4-core machine (2 s for `wav2vec2-base-960h`). If a download
+fails, word times fall back to Parakeet's and the load is retried every 5
+minutes; `/health` reports each aligner's state per
+quantization under `aligner`.
 
 | Variable | Default | |
 |---|---|---|
-| `PARAKEET_ALIGN_WORDS` | `false` | alignment for requests that don't send `align_words`; `true` aligns every English word request unless it sends `align_words=false` |
-| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers; empty to use them only when `language` is sent |
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers: a bare ISO 639-1 code, or empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
 #### Spoken numbers
@@ -403,10 +444,13 @@ Different speech often comes out as the same text — `£2.10` is "two pounds
 ten", "two pounds and ten pence" or "two ten"; `1500` is "fifteen hundred" or
 "one thousand five hundred"; `911` is "nine one one" or "nine eleven" — so each
 number's possible readings are scored against its stretch of the audio by the
-word aligner, and the one that was said is kept. Likely mishearings of an
-amount are scored too (`£1.10` for "two pounds ten", `€3` for "thirty euros";
-not of a time, date, ordinal or code), and one replaces Parakeet's number only
-when the audio prefers it by a clear margin. Word times follow the spoken words.
+request's [aligner](#word-timestamps) (`aligner=`, as for word times), and the
+one that was said is kept. The choice was tuned and measured with
+`wav2vec2-base-960h`; the other aligners have not been measured for it yet.
+Likely mishearings of an amount are scored too (`£1.10` for "two pounds ten",
+`€3` for "thirty euros"; not of a time, date, ordinal or code), and one
+replaces Parakeet's number only when the audio prefers it by a clear margin.
+Word times follow the spoken words.
 
 * **Cost.** Almost every number has several readings or a likely mishearing
   (97% of the chunks with a number in our test corpus), so the aligner model
@@ -416,7 +460,7 @@ when the audio prefers it by a clear margin. Word times follow the spoken words.
   single worker with word requests, so audio with numbers in it is heard at
   about 13x real time however many requests are waiting. Requests with no
   number, or whose numbers have nothing to decide (`6pm`, `6 pm`), are not held
-  up. With the model unavailable, each number's
+  up. With no aligner named, or the model unavailable, each number's
   first reading is used — a fixed default, usually the most common one ("two
   pounds ten", "ten to fifteen"), though a code is read as an amount (`911` as
   "nine hundred eleven"), and so are a time and a year before 1100 (`1030` as

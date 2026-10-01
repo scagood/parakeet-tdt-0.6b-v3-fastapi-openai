@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from collections import OrderedDict
 
 import pytest
 
@@ -46,7 +47,7 @@ def _hermetic_aligner(monkeypatch):
     # CI's onnxruntime stub has no InferenceSession: without one the loader
     # fails before its download, and this guard would never see it.
     monkeypatch.setattr(aligner.ort, "InferenceSession", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(aligner, "_loaded", {})
+    monkeypatch.setattr(aligner, "_loaded", OrderedDict())
     monkeypatch.setattr(aligner, "_failed_at", {})
     yield
     assert not reached, f"reached the real aligner loader for {reached}: fake aligner.for_chunk"

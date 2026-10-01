@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from parakeet_service import routes
 from parakeet_service.config import TARGET_SR
 
+# The aligner a request names (option C: there is no default).
+EAR = ("wav2vec2-base-960h", "int8")
+
 
 def _prepared(ranges_sec, pieces=None):
     ranges = [(int(s * TARGET_SR), int(e * TARGET_SR)) for s, e in ranges_sec]
@@ -106,13 +109,12 @@ def test_aligner_retimes_each_chunk_from_its_own_audio(monkeypatch):
     first = _result([" hi", " there"], [0.0, 0.8])
     second = _result([" bye"], [0.0])
     calls = []
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, language: _FakeChunk(wav, calls))
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, *_: _FakeChunk(wav, calls))
 
     _text, _segments, words = routes._stitch(
         _prepared([(0.0, 2.0), (5.0, 7.0)], pieces=["chunk0", "chunk1"]),
         [first, second],
-        align=True,
-    )
+        align=True, aligner_choice=EAR)
     assert calls == [("chunk0", ["hi", "there"]), ("chunk1", ["bye"])]
     assert [(w["word"], w["start"], w["end"]) for w in words] == [
         ("hi", 0.25, 0.5),
@@ -124,8 +126,8 @@ def test_aligner_retimes_each_chunk_from_its_own_audio(monkeypatch):
 def test_unavailable_aligner_keeps_model_times(monkeypatch):
     prepared = _prepared([(0.0, 2.0)])
     result = _result([" hi"], [0.4])
-    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, language: None)
-    assert routes._stitch(prepared, [result], align=True) == routes._stitch(prepared, [result])
+    monkeypatch.setattr(routes.aligner, "for_chunk", lambda wav, *_: None)
+    assert routes._stitch(prepared, [result], align=True, aligner_choice=EAR) == routes._stitch(prepared, [result])
 
 
 def test_unaligned_words_stay_between_aligned_neighbours():

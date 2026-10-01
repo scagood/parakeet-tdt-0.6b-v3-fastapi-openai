@@ -35,6 +35,29 @@ def test_quantization_defaults_to_fp32_whatever_the_hardware():
     assert variant_key("Whisper-Tiny", "FP16") == "whisper-tiny:fp16"
 
 
+@pytest.mark.parametrize(
+    ("value", "quantization", "named"),
+    [
+        ("parakeet-v3", None, ("parakeet-v3", None)),
+        ("parakeet-v3", "int8", ("parakeet-v3", "int8")),
+        ("parakeet-v3:fp16", None, ("parakeet-v3", "fp16")),
+        ("parakeet-v3:FP16", "fp16", ("parakeet-v3", "fp16")),  # both sent, and they agree
+    ],
+)
+def test_a_name_may_carry_its_quantization_after_a_colon(value, quantization, named):
+    assert routes._named(value, quantization, "model", "quantization") == named
+
+
+@pytest.mark.parametrize(
+    ("value", "quantization", "complaint"),
+    [("parakeet-v3:fp16", "int8", "says 'fp16' but quantization says 'int8'"), ("parakeet-v3:", None, "no quantization")],
+)
+def test_a_colon_that_disagrees_or_names_nothing_is_a_400(value, quantization, complaint):
+    with pytest.raises(HTTPException) as caught:
+        routes._named(value, quantization, "model", "quantization")
+    assert caught.value.status_code == 400 and complaint in caught.value.detail
+
+
 def test_unknown_quantization_is_a_400_naming_the_choices():
     with pytest.raises(HTTPException) as err:
         routes._variant("parakeet-v3", "q4")
