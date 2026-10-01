@@ -9,314 +9,484 @@ v3 (25 European languages) and v2 (English), and OpenAI's Whisper, on CPU or
 GPU. Point an OpenAI client at it and call `/v1/audio/transcriptions`.
 
 Parakeet's Token-and-Duration Transducer (TDT) architecture lets it transcribe
-many times faster than real time on a consumer CPU, and faster still on a GPU; see
-[Benchmark](#benchmark). The project started as a Parakeet v3 server, which is
-why its settings are named `PARAKEET_*`.
+many times faster than real time on a consumer CPU, and faster still on a GPU;
+see [Performance](#performance). The project started as a Parakeet v3 server,
+which is why its settings are named `PARAKEET_*`.
 
-## 🚀 The FastAPI service
+Upgrading from 1.5.0? Read [UPGRADING.md](UPGRADING.md) first: every request
+must now name its model.
 
-The service lives under [`parakeet_service/`](parakeet_service/) and starts
-with [`server.py`](server.py). Compared with the Flask service it replaced in
-1.x, it adds:
+## Quick start
 
-- In-process audio decode (single `ffmpeg` per request, none per chunk)
-- **Silero-VAD auto-chunking** that splits long files on pause midpoints
-- **Parallel `InferencePool`** that fans-out single-item ORT calls across
-  multiple threads — both for concurrent requests and for the chunks of
-  one long request
-
-Compared with the Flask+Waitress service on a 12700KF CPU (1.x, int8):
-
-| Workload                | Legacy            | Optimized          | Δ        |
-|-------------------------|-------------------|--------------------|----------|
-| 300 s file (single)     | 17.96 s / 15.7×   | **10.41 s / 27.2×**| **+73%** |
-| 16× 10 s concurrent     | 34.6× throughput  | **39.3× throughput**| +13%    |
-
-The service defaults to CUDA with GPU micro-batching. The GPU numbers below
-were measured in 1.x on an RTX 3090 at FP32, the default precision, with the
-export 2.0 replaced; on GPU, `quantization=fp16` roughly halves VRAM.
-
-| Workload                | CPU optimized      | GPU profile (FP32) | Δ        |
-|-------------------------|--------------------|--------------------|----------|
-| 300 s file (single)     | 10.41 s / 27.2×    | **1.37 s / 205.9×**| **+7.6×** |
-| 16× 10 s concurrent     | 39.3× throughput   | **200.3× throughput**| **+5.1×** |
-
-See [OPTIMIZATION.md](OPTIMIZATION.md) for the full benchmark, design
-rationale, and tunable env knobs.
+### Docker
 
 ```bash
-python server.py                          # GPU (the default), on :5092
-PARAKEET_USE_GPU=false python server.py   # CPU
+docker run -d --name parakeet-cpu -p 5092:5092 -v parakeet-models:/app/models \
+    -e PARAKEET_PRELOAD_MODELS=parakeet-v3 ghcr.io/scagood/stt-api:latest-cpu
 ```
 
-## ⚡ WAV uploads skip FFmpeg
+The first start downloads `parakeet-v3` before the server reports ready. For
+the GPU image, `docker compose` and the image tags, see [DOCKER.md](DOCKER.md).
 
-An uncompressed 16 kHz PCM WAV, mono or stereo at any sample width, is decoded
-in process. Everything else (other sample rates, compressed audio, other
-containers) goes through a single FFmpeg call per request. Resampling stays in
-FFmpeg, which is faster than numpy for all but the shortest clips; see
-[OPTIMIZATION.md](OPTIMIZATION.md#what-did-not-work-and-why).
+### From source
 
-## 🌍 Multilingual Support
-
-**Parakeet TDT 0.6B v3** transcribes any of its **25 languages** without being told which one it is hearing, with punctuation and capitalization:
-
-English, Spanish, French, Russian, German, Italian, Polish, Ukrainian, Romanian, Dutch, Hungarian, Greek, Swedish, Czech, Bulgarian, Portuguese, Slovak, Croatian, Danish, Finnish, Lithuanian, Slovenian, Latvian, Estonian, Maltese
-
-Transcription needs no `language`. [Word timestamps](#word-timestamps) and
-[spoken numbers](#spoken-numbers) do: without it they assume
-`PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it.
-
-## Benchmark
-
-These were measured in 1.x, on the istupakov (fp32, int8) and grikdotnet (fp16)
-`parakeet-v3` exports that 2.0 replaced. For the current export's numbers, see
-[Model Selection](#model-selection).
-
-### LibriSpeech test-clean (Verified Ground Truth) ⭐
-
-Benchmarked on **LibriSpeech test-clean** dataset with professionally verified human transcriptions. This provides reliable, reproducible accuracy metrics.
-
-**Test Environment:** CPU-only inference, 50 samples (~350 seconds of audio)
-
-| Model | Precision | Accuracy | WER | CER | Speedup (RTF) |
-|-------|-----------|----------|-----|-----|---------------|
-| **Parakeet TDT 0.6B v3** | INT8 | **97.84%** | 2.16% | 0.56% | **18.41x** (0.054) |
-| **Parakeet TDT 0.6B v3** | FP16 | **97.84%** | 2.16% | 0.56% | **18.82x** (0.053) |
-| **Parakeet TDT 0.6B v3** | FP32 | **97.84%** | 2.16% | 0.56% | **19.42x** (0.052) |
-| Whisper Large v3* | FP16 | ~95-96% | ~4-5% | ~2-3% | varies |
-
-> *Whisper Large v3 benchmarks from published literature on LibriSpeech test-clean. Actual results vary by implementation and hardware.
-
-**Key Findings:**
-- All three precisions scored the same (97.84%) on these 50 short samples. On
-  longer audio the int8 export dropped words after silences, and it was ~4 WER
-  points worse on Spanish (below)
-- Real-time factor (RTF) of ~0.05 means 20x faster than real-time
-- Competitive with Whisper Large v3 accuracy with significantly faster CPU inference
-
----
-
-### Parakeet TDT vs Faster Whisper
-
-We compare the performance of **Parakeet TDT (CPU)** against **faster-whisper (GPU & CPU)**.
-
-The metric used is **Speedup Factor** (Audio Duration / Processing Time). Higher is better.
-
-| Implementation | Hardware | Model | Precision | Speedup |
-| --- | --- | --- | --- | --- |
-| **Parakeet TDT** (Ours) | **CPU** (i7-12700KF) | **TDT 0.6B v3** | **int8** | **~29.7x** |
-| **Parakeet TDT** (Ours) | **CPU** (i7-4790) | **TDT 0.6B v3** | **int8** | **~17.0x** |
-| faster-whisper | GPU (RTX 3070 Ti) | Large-v2 | int8 | 13.2x |
-| faster-whisper | GPU (RTX 3070 Ti) | Large-v2 | fp16 | 12.4x |
-| faster-whisper | CPU (i7-12700K) | Small | int8 | 7.6x |
-| faster-whisper | CPU (i7-12700K) | Small | fp32 | 4.9x |
-
-*   **Parakeet TDT**: Benchmarked on the CPUs listed, with ONNX Runtime INT8.
-*   **faster-whisper**: Benchmarks from [official faster-whisper documentation](https://github.com/SYSTRAN/faster-whisper).
-
-### Detailed Parakeet Performance
-
-| Metrics | Result |
-| --- | --- |
-| **Average Speedup** | **29.7x** |
-| **Real Time Factor (RTF)** | **0.033** |
-| **Max Speedup** | **~30x** |
-
-### Extended Multilingual Benchmark (YouTube Samples)
-
-Additional benchmark on real-world YouTube content across multiple languages:
-
-| Language | Model Variant | Latency (s) | Speedup (RTF) | WER | CER |
-| --- | --- | ---: | ---: | ---: | ---: |
-| English | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 70.60 | 20.32x (0.049) | 5.13% | 2.35% |
-| English | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 135.43 | 10.59x (0.094) | 5.48% | 2.83% |
-| English | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 112.80 | 12.72x (0.079) | 5.53% | 2.85% |
-| English | Whisper-Large-v3 (DeepInfra) | 53.45 | 26.84x (0.037) | 4.25% | 3.91% |
-| Spanish | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 29.92 | 18.64x (0.054) | 19.45% | 13.79% |
-| Spanish | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 48.52 | 11.49x (0.087) | 15.31% | 11.33% |
-| Spanish | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 38.99 | 14.30x (0.070) | 15.31% | 11.33% |
-| Spanish | Whisper-Large-v3 (DeepInfra) | 15.79 | 35.30x (0.028) | 20.70% | 18.05% |
-
-> ⚠️ **Note:** YouTube subtitle references may contain errors. For verified accuracy, see LibriSpeech benchmark above.
-
-## Requirements
-
-*   [Docker](https://docs.docker.com/get-docker/) (Recommended)
-*   Or: Python 3.14 and [FFmpeg](https://ffmpeg.org/)
-
-### CPU Optimization
-ONNX Runtime's CPU execution provider dispatches AVX2/FMA kernels from the standard wheel when the host CPU supports them. The server sizes ONNX Runtime's threads to the available physical CPU cores, keeps NumPy/BLAS thread pools from competing with inference, and reports what it chose under `cpu` in `/health`.
-
-For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pinning the process to Performance cores (P-cores). You can also override the auto-tuned defaults:
-
-* `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to `1` on GPU. With `PARAKEET_USE_GPU=false`, defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
-* `PARAKEET_ORT_INTER_THREADS`: ONNX Runtime inter-op threads. Defaults to `1`, which is best for single-model inference. Minimum: `1`.
-* `PARAKEET_INFER_WORKERS`: concurrent single-item inference calls on CPU (`PARAKEET_BATCHED=0`). Defaults to the available logical CPUs (after the cgroup quota is applied) divided by `PARAKEET_ORT_INTRA_THREADS`, capped at `4`, so workers × intra-op threads fits the CPU budget. Minimum: `1`.
-
-### Running under an orchestrator
-
-Two defaults matter when replicas start and stop frequently:
-
-* **CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is invisible to `sched_getaffinity()` and `psutil`, which keep reporting the node's full core count. Thread pools are now sized from the cgroup quota when one is present, so a 4-core pod no longer starts dozens of ORT threads. The quota is read from the process's own cgroup (via `/proc/self/cgroup`) and its ancestors, so it is found under systemd `CPUQuota=` and `--cgroupns=host` as well as in a private cgroup namespace. `/health` reports `cgroup_quota` next to the detected core counts so you can confirm what was applied.
-* **Cold start.** List the models a replica should serve warm in `PARAKEET_PRELOAD_MODELS` (comma-separated `model` or `model:quantization`, e.g. `parakeet-v3`); nothing is preloaded by default. `PARAKEET_WARMUP` (on by default) then pushes one synthetic chunk through each preloaded model before `/healthz` reports ready, moving ONNX Runtime's first-inference kernel and arena setup into startup instead of onto the first real request. A warm-up that fails, or exceeds `PARAKEET_WARMUP_TIMEOUT_SEC` (default `120`), fails startup rather than reporting a replica ready that cannot run inference — raise the timeout on a slow host, or set `PARAKEET_WARMUP=false` to skip it. Container healthcheck `start_period` values in the Dockerfiles and `docker-compose.yml` allow for model load plus the default timeout; raise them by the same amount if you raise the timeout. Set `PARAKEET_HF_OFFLINE=true` when the model cache is pre-seeded — it skips the Hugging Face revision check that otherwise runs on every start, which adds up when many replicas start at once.
-
-## Installation
-
-### 🐳 Docker (Recommended)
-
-The easiest way to get started. No dependencies to install!
-
-**CPU Deployment:**
-```bash
-git clone https://github.com/scagood/stt-api
-cd stt-api
-docker compose up parakeet-cpu -d
-```
-
-**GPU Deployment** (requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)):
-```bash
-docker compose up parakeet-gpu -d
-```
-
-The server will be available at `http://localhost:5092`. See [DOCKER.md](DOCKER.md) for more options.
-
----
-
-### Conda (Alternative)
-
-For development or customization:
+You need Python 3.14 and [FFmpeg](https://ffmpeg.org/). In a virtual
+environment (venv or conda):
 
 ```bash
-conda create -n parakeet-onnx python=3.14
-conda activate parakeet-onnx
 git clone https://github.com/scagood/stt-api
 cd stt-api
 pip install -r requirements.txt
+python server.py   # GPU, on :5092
 ```
 
 `requirements.txt` installs `onnxruntime-gpu`, which has no macOS build. For a
 CPU-only install, swap it for `onnxruntime` at the same version, as
-`Dockerfile.cpu` does:
+`Dockerfile.cpu` does, and turn the GPU off:
 
 ```bash
 sed 's/^onnxruntime-gpu\[[a-z,]*\]==/onnxruntime==/' requirements.txt > requirements.cpu.txt
 pip install -r requirements.cpu.txt
+PARAKEET_USE_GPU=false python server.py
 ```
 
 On Linux, install the CPU build of PyTorch first (`silero-vad` depends on it),
 or pip pulls the multi-GB CUDA wheels; `Dockerfile.cpu` shows how.
 
-## Usage
-
-### Start the Server
-
-Parakeet TDT provides an OpenAI-compatible API server.
+### First request
 
 ```bash
-conda activate parakeet-onnx
-python server.py                          # GPU
-PARAKEET_USE_GPU=false python server.py   # CPU
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@audio.mp3 -F model=parakeet-v3
 ```
-*   **Port**: 5092
-*   **Docs**: [http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)
 
-### Client Example (Python)
+```json
+{"text":"The quick brown fox jumps over the lazy dog."}
+```
 
-You can use the standard `openai` Python library to interact with the server.
-It is a client dependency, not a server one, so install it separately with
-`pip install openai`.
+With the OpenAI Python SDK (`pip install openai`; the server doesn't need it):
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:5092/v1",
-    api_key="sk-no-key-required"
-)
+client = OpenAI(base_url="http://localhost:5092/v1", api_key="sk-no-key-required")
 
-audio_file = open("audio.mp3", "rb")
-transcript = client.audio.transcriptions.create(
-  model="parakeet-v3",  # required; see Model Selection
-  file=audio_file,
-  response_format="text"
-)
-
-print(transcript)
+with open("audio.mp3", "rb") as f:
+    transcript = client.audio.transcriptions.create(model="parakeet-v3", file=f)
+print(transcript.text)
 ```
 
-### Model Selection
+Swagger UI at [http://localhost:5092/docs](http://localhost:5092/docs) lets
+you try every request from the browser.
 
-Every request must name its `model`; there is no server default, and a request
-without one is rejected with 422. Precision is a separate, optional
-`quantization` field: `fp32` (the default, on any hardware), `fp16` or `int8`.
-It can also follow the name after a colon: `model=parakeet-v3:fp16` is the same
-as `model=parakeet-v3` with `quantization=fp16`; if a request sends both, they
-must agree.
-`GET /v1/models` lists every model with the languages it transcribes and the
-quantizations it offers.
+## Choosing a model
 
-| Model | Languages | fp32 | fp16 | int8 |
-|-------|-----------|------|------|------|
-| `parakeet-v3` | 25 | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` (fp16 encoder, fp32 decoder) | `Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx` |
-| `parakeet-v2` | English only | `istupakov/parakeet-tdt-0.6b-v2-onnx` | `ysdede/parakeet-tdt-0.6b-v2-onnx` | `istupakov/parakeet-tdt-0.6b-v2-onnx` |
+Every request names its `model`; there is no default, and a request without
+one is a 422. Add a precision after a colon (`parakeet-v3:fp16`), or send it
+as the `quantization` field; if you send both, they must agree. With no
+precision you get `fp32`. An unknown model or precision is a 400 that lists
+the valid ones.
 
-Whisper is served as `whisper-tiny`, `whisper-base`, `whisper-small`,
-`whisper-medium`, `whisper-large-v3` and `whisper-large-v3-turbo` (99
-languages), plus English-only `whisper-tiny.en`, `whisper-base.en`,
-`whisper-small.en` and `whisper-medium.en`, each in all three quantizations.
+| Model | Languages | |
+|---|---|---|
+| `parakeet-v3` | 25 European | The main model |
+| `parakeet-v2` | English | |
+| `whisper-tiny`, `whisper-base`, `whisper-small`, `whisper-medium`, `whisper-large-v3`, `whisper-large-v3-turbo` | 99 | Word times only [with an aligner](#word-timestamps) |
+| `whisper-tiny.en`, `whisper-base.en`, `whisper-small.en`, `whisper-medium.en` | English | Word times only [with an aligner](#word-timestamps) |
 
-**Choosing a precision.** FP16 halves VRAM on GPU, so ask for `fp16` there.
-On CPU, ONNX Runtime upcasts FP16 (slower), so keep `fp32`.
+Every model comes in `fp32`, `fp16` and `int8`. Parakeet v3 transcribes
+Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French,
+German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish,
+Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and
+Ukrainian, without being told which it is hearing.
 
-`parakeet-v3` runs Olicorne's re-export of NVIDIA's `.nemo` checkpoint in all
-three precisions. On a 648 s English audiobook chapter it scored 1.13% (fp32),
-1.07% (fp16) and 1.20% (int8) WER against 1.20%, 1.20% and 1.83% for the
-istupakov/grikdotnet exports it replaced, with int8 ~25% faster. It was chosen
-on CPU and has **not been tested on a GPU** or outside English; the
-`parakeet-v3` entry in `parakeet_service/models.yaml` lists what to revert to if
-CUDA gives trouble.
+```bash
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@audio.mp3 -F model=parakeet-v3:fp16
+```
 
-INT8 is the fastest on CPU. istupakov's `parakeet-v3` int8 measurably dropped
-words after silences, and the multilingual benchmark above shows it ~4 WER
-points worse than FP32 on Spanish; Olicorne's, which replaced it, matched FP32
-on the English chapter above but has no multilingual numbers yet. Pick INT8
-deliberately rather than by default.
+**Choosing a precision.** On a GPU, `fp16` roughly halves VRAM. On a CPU, keep
+`fp32`: ONNX Runtime upcasts fp16 there, which is slower. `int8` is the
+fastest on CPU, but pick it deliberately: the 1.x int8 export dropped words
+after silences and was ~4 WER points worse than fp32 on Spanish. The current
+one matched fp32 on English (below) but has no multilingual numbers yet.
 
-Models named in `PARAKEET_PRELOAD_MODELS` (as `model` for fp32, or
-`model:quantization`) are loaded (and warmed up) before the service reports
-ready; the others are lazy-loaded on first use and cached afterwards. A
-preloaded model is never used for a request that names another. A model that
-cannot be loaded (its download fails, it is missing from the cache under
-`PARAKEET_HF_OFFLINE=true`, ONNX Runtime refuses it) answers 503 with a
-`detail` naming the model and the cause; the failure is not cached, so the
-next request tries again.
+**Which export.** `parakeet-v3` runs Olicorne's re-export of NVIDIA's `.nemo`
+checkpoint in all three precisions. On a 648 s English audiobook chapter it
+scored 1.13% (fp32), 1.07% (fp16) and 1.20% (int8) WER, against 1.20%, 1.20%
+and 1.83% for the istupakov/grikdotnet exports it replaced, with int8 ~25%
+faster. It was chosen on CPU and has **not been tested on a GPU** or outside
+English; the `parakeet-v3` entry in
+[`parakeet_service/models.yaml`](parakeet_service/models.yaml) lists what to
+revert to if CUDA gives trouble.
 
-**To select a model and precision via API:**
+**Loading.** Models named in `PARAKEET_PRELOAD_MODELS` load at startup; the
+rest load on first request and then stay loaded (`PARAKEET_MODEL_CACHE_SIZE`
+caps how many). A model that can't be loaded (a failed download, missing from
+the cache under `PARAKEET_HF_OFFLINE=true`, refused by ONNX Runtime) answers
+503 with a `detail` naming it and the cause; the next request tries again.
+
+`GET /v1/models` lists every model; `GET /v1/models/parakeet-v3` returns one:
+
+```json
+{"id":"parakeet-v3","object":"model","created":1785888000,"owned_by":"nvidia","language":["bg","hr","cs","da","nl","en","et","fi","fr","de","el","hu","it","lv","lt","mt","pl","pt","ro","ru","sk","sl","es","sv","uk"],"quantizations":["fp32","fp16","int8"],"task":"automatic-speech-recognition"}
+```
+
+## Response formats
+
+`response_format` is `json` (the default), `text`, `srt`, `vtt` or
+`verbose_json`. `verbose_json` always has segments, and has words when you send
+`timestamp_granularities[]=word` (`words` is `null` otherwise).
+`timestamp_granularities[]` takes `word` and `segment`; anything else is a 400.
+
+```bash
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@audio.mp3 -F model=parakeet-v3 \
+  -F response_format=verbose_json -F 'timestamp_granularities[]=word'
+```
+
+```json
+{
+  "task": "transcribe",
+  "language": "auto",
+  "duration": 2.3473125,
+  "text": "The quick brown fox jumps over the lazy dog.",
+  "segments": [
+    {"id": 0, "seek": 0, "start": 0.0, "end": 2.3473125,
+     "text": "The quick brown fox jumps over the lazy dog.",
+     "tokens": [], "temperature": 0.0, "avg_logprob": 0.0,
+     "compression_ratio": 0.0, "no_speech_prob": 0.0}
+  ],
+  "words": [
+    {"start": 0.0, "end": 0.16, "word": "The"},
+    {"start": 0.16, "end": 0.4, "word": "quick"},
+    {"start": 0.4, "end": 0.72, "word": "brown"},
+    ...
+    {"start": 2.0, "end": 2.3473125, "word": "dog."}
+  ]
+}
+```
+
+A segment's `tokens`, `temperature`, `avg_logprob`, `compression_ratio` and
+`no_speech_prob` are always empty or zero; they are there for OpenAI clients
+that expect them. `language` echoes the request's, or `auto`.
+
+## Word timestamps
+
+Parakeet's own word times sit on 80 ms frames, and each word's end is
+estimated: in the example above, every word ends exactly where the next one
+starts. Name an `aligner` and a forced aligner retimes the words from the
+audio instead, on 20 ms frames, WhisperX-style but on ONNX Runtime with no
+PyTorch. Parakeet still decides the words.
+
+```bash
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@audio.mp3 -F model=parakeet-v3 \
+  -F response_format=verbose_json -F 'timestamp_granularities[]=word' \
+  -F language=en -F aligner=mms-300m-forced-aligner
+```
+
 ```python
 transcript = client.audio.transcriptions.create(
   model="parakeet-v3",
-  file=audio_file,
-  response_format="text",
-  extra_body={"quantization": "fp16"},  # omit for fp32
+  file=f,
+  response_format="verbose_json",
+  timestamp_granularities=["word"],
+  language="en",
+  extra_body={"aligner": "mms-300m-forced-aligner"},  # non-commercial licence
 )
 ```
 
-#### Your own model catalog
+The same clip, before and after (seconds):
 
-The models above are defined in [`parakeet_service/models.yaml`](parakeet_service/models.yaml):
-per model its family, languages and chunk lengths, and per quantization a
-Hugging Face repo, a pinned commit and, where they differ from the fp32
-defaults, the files to load. Its `aligners` section lists the
-[word aligners](#word-timestamps) the same way: per aligner its export layout,
-the languages it aligns, the steps that spell a transcript for it, its CTC
-tokens and default quantization, and per quantization a repo, a pinned commit
-and the files that differ (`aligners: {}` serves none). To serve a
-different set without rebuilding the image, point `PARAKEET_MODEL_CATALOG` at
-another file of the same shape. It **replaces** the built-in catalog, so copy
-the built-in file and edit it. The file is checked at startup and the service
-refuses to start on a mistake, naming it; it is read only then, so restart
-after changing it.
+| Word | Parakeet | `mms-300m-forced-aligner` |
+|---|---|---|
+| The | 0.00–0.16 | 0.04–0.10 |
+| quick | 0.16–0.40 | 0.18–0.36 |
+| brown | 0.40–0.72 | 0.42–0.66 |
+| fox | 0.72–1.04 | 0.72–0.94 |
+| jumps | 1.04–1.36 | 1.12–1.36 |
+
+Name the aligner as you name a model, with its precision after a colon
+(`aligner=mms-300m-forced-aligner:fp32`) or in `aligner_quantization`. There is
+no default aligner: a request that names none gets Parakeet's times.
+`GET /v1/aligners` lists them:
+
+| Aligner | Languages | Error, start / end (English TTS) | License |
+|---|---|---|---|
+| [`mms-300m-forced-aligner`](https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX) | `en` | 37 / 106 ms | **CC-BY-NC-4.0: non-commercial only** |
+| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
+| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
+| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
+
+For English, use `mms-300m-forced-aligner`: it is the most accurate, and on
+real audiobook narration it sounds clearly the best. Its licence is
+non-commercial; for commercial use, `wav2vec2-large-xlsr-53-english` is the
+next best. `wav2vec2-base-960h` is the smallest and fastest, but the least
+accurate. For the other languages, use `omnilingual-ctc-300m`:
+
+```bash
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@entretien.mp3 -F model=parakeet-v3 \
+  -F response_format=verbose_json -F 'timestamp_granularities[]=word' \
+  -F language=fr -F aligner=omnilingual-ctc-300m
+```
+
+Each aligner comes in `int8` (the default) and `fp32`, which is about as
+accurate and 4x the download. Which aligners exist, and the languages each
+aligns, is set in the [model catalog](#your-own-model-catalog). An unknown
+aligner or precision, or a language the aligner doesn't align, is a 400 that
+lists what is available.
+
+**Language.** `language` is a bare ISO 639-1 code (`en`, `fr`), or empty or
+`auto`; anything else (`en-US`, `EN`, `English`) is a 400. Nothing detects the
+language for alignment: a request without one is aligned as
+`PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it, so send
+`language` for anything else. A chunk mostly in another alphabet (Cyrillic,
+Greek, ...) keeps Parakeet's times, but other Latin-script languages would be
+aligned as English. English-only models (`parakeet-v2`, `whisper-*.en`) are
+aligned as English whatever `language` says.
+
+**Whisper** has no word times of its own, so it returns words only when the
+request names an aligner, and a multilingual Whisper model only when the
+request also sends `language`. If a chunk can't be aligned at all, its `words`
+are `null`, never guessed; a word the aligner can't place sits between its
+aligned neighbours.
+
+**Numbers and symbols** are aligned as they are said, by the English
+aligners: `42` as "forty two", `$5m` as "five million dollars", `20°C`, `5 May`
+as "the fifth of May", `R&D` as "ar and dee". Only the timing uses this; the
+text is never changed. A count in year range (`1500`) is heard as a year, so if
+it was said "one thousand five hundred" it starts a little late.
+`omnilingual-ctc-300m` skips numbers in every language, English included: a
+number keeps Parakeet's times, and the words around it are aligned as usual.
+
+**Transcript mistakes.** On clean speech, a word Parakeet missed or got wrong
+doesn't drag its neighbours' times; in heavy noise it occasionally still does.
+An invented word in a pause takes the pause, but a long one invented in the
+middle of continuous speech pushes its neighbours aside.
+
+**Cost.** The aligner runs on the CPU, even on GPU hosts, one request at a time
+on its own threads, so it never holds up other requests' audio decoding. Each
+aligner downloads on the first request that names it (int8: ~320 MB, or
+~95 MB for `wav2vec2-base-960h`) and adds roughly 3 s per 30 s of audio on a
+4-core machine (2 s for `wav2vec2-base-960h`). If a download fails, words keep
+Parakeet's times and the load is retried every 5 minutes; `/health` reports
+each aligner's state under `aligner`.
+
+## Spoken numbers
+
+Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
+may come back as `£25` or `25 lb`, "ten thirty" as `1030`. With
+`spoken_numbers=true`, English transcripts (text, segments, words, every
+response format, and the batch endpoint) say numbers, money and units in words,
+the way they were said:
+
+| Parakeet wrote | Transcript says |
+|---|---|
+| `$5`, `cost$25` | five dollars, cost twenty-five dollars |
+| `£25`, `25 lb` | twenty-five pounds |
+| `$5 million`, `$5m` | five million dollars |
+| `20°C`, `50%`, `21st` | twenty degrees Celsius, fifty percent, twenty-first |
+| `5 May`, `90 mph` | the fifth of May, ninety miles per hour |
+| `MP3`, `COVID-19`, `5m`, `12C` | unchanged: names, or ambiguous |
+
+```bash
+curl http://localhost:5092/v1/audio/transcriptions \
+  -F file=@audio.mp3 -F model=parakeet-v3 \
+  -F spoken_numbers=true -F language=en -F aligner=wav2vec2-base-960h
+```
+
+From the OpenAI SDK, send `extra_body={"spoken_numbers": True}`.
+`PARAKEET_SPOKEN_NUMBERS=true` turns it on for requests that don't say;
+they can still send `spoken_numbers=false`.
+
+**How it chooses.** Different speech often comes out as the same text: `£2.10`
+is "two pounds ten" or "two ten", `911` is "nine one one" or "nine eleven". So
+the request's [aligner](#word-timestamps) scores each number's readings
+against the audio and keeps the one that was said. It also scores likely
+mishearings of an amount (`£1.10` for "two pounds ten", `€3` for "thirty
+euros"), and replaces Parakeet's number only when the audio clearly prefers
+one. Without an aligner, each number gets a fixed reading, usually the most
+common one, but a code or a time is read as an amount (`911` as "nine hundred
+eleven", `1030` as "one thousand thirty"). The choice was tuned with
+`wav2vec2-base-960h`; the other aligners haven't been measured for it yet.
+
+**Cost.** Most chunks with a number need the aligner (97% in our test
+corpus): roughly 2 s per 30 s chunk on a 4-core CPU, plus up to 0.9 s to choose
+on a dense chunk. They queue with word requests on the aligner's single worker,
+so audio with numbers in it is heard at about 13x real time however many
+requests are waiting. Requests whose numbers have nothing to decide (`6pm`)
+aren't held up.
+
+**Language.** English only, decided as for word timestamps: a request without
+`language` is taken as `PARAKEET_ALIGN_DEFAULT_LANGUAGE`. A chunk mostly in
+another alphabet is left as written, but Latin-script languages sent without
+`language` are rewritten as if English, so send `language`, or set the default
+empty if you serve them.
+
+## Batch transcription
+
+`POST /v1/audio/transcriptions/batch` takes several `files` in one request,
+with the same `model`, `quantization`, `aligner`, `aligner_quantization` and
+`spoken_numbers` fields as the single-file endpoint, but no `language` or
+`response_format`. It returns text only:
+
+```bash
+curl http://localhost:5092/v1/audio/transcriptions/batch \
+  -F files=@fox.wav -F files=@fox.aiff -F model=parakeet-v3
+```
+
+```json
+{"results":[{"filename":"fox.wav","text":"The quick brown fox jumps over the lazy dog.","duration":2.3473125},{"filename":"fox.aiff","text":"The quick brown fox jumps over the lazy dog.","duration":2.3473125}],"batch_size":2}
+```
+
+A batch is limited to `PARAKEET_MAX_BATCH_FILES` (16) files and
+`PARAKEET_MAX_BATCH_BYTES` (512 MiB); see [request limits](#request-limits).
+
+## Comparing models and aligners by ear
+
+With `PARAKEET_COMPARE_UI=true`, `GET /compare` serves a page for choosing
+between them by listening. Pick an audio file and cut it to a clip, then add
+rows: a model at a quantization, with or without an aligner (`parakeet-v2:int8`;
+`parakeet-v2:int8` + `mms-300m-forced-aligner:int8`; ...). **Compare** sends the
+clip through `/v1/audio/transcriptions` once per row and lines up each row's
+words under the clip's waveform. Click a word to hear the span that row gave
+it; the same word is picked out in every row, and in a table of starts and
+ends. The arrow keys step through words and rows, Enter replays, and playback
+can be slowed to ½×. A file of exact word times, as synthetic speech has (a
+`verbose_json` response or its `words`, or SRT/VTT with one cue per word), adds
+a dashed reference row and each row's average error against it.
+
+The browser decodes the file and sends only the clip, as a 16 kHz WAV, so the
+page and the server hear the same samples. The page is off by default: each
+row is a full transcription, and loads any model or aligner it names, which
+then stays loaded.
+
+## Open WebUI
+
+This server works as [Open WebUI](https://openwebui.com/)'s speech-to-text
+engine. Start it (see [Quick start](#quick-start)), then in **Open WebUI
+Settings → Audio**:
+
+- **STT Engine**: `OpenAI`
+- **OpenAI Base URL**: `http://127.0.0.1:5092/v1`
+- **OpenAI API Key**: `sk-no-key-required`
+- **STT Model**: `parakeet-v3` (required: the server has no default model)
+
+## Configuration
+
+Every setting is an environment variable, and all are optional. The Docker
+images already set the CPU or GPU ones (`PARAKEET_USE_GPU`, `PARAKEET_BATCHED`,
+...).
+
+**Server**
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_HOST` | `0.0.0.0` | bind address |
+| `PARAKEET_PORT` | `5092` | bind port |
+| `PARAKEET_UVICORN_WORKERS` | `1` | uvicorn worker processes; each loads its own copy of every model |
+| `PARAKEET_COMPARE_UI` | `false` | serve the [`/compare` page](#comparing-models-and-aligners-by-ear) |
+
+**Models**
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_MODELS_DIR` | `models/` in the checkout (`/app/models` in the images) | model cache; must be writable, even when fully seeded |
+| `PARAKEET_MODEL_CATALOG` | the built-in `models.yaml` | a catalog file that replaces it; see [below](#your-own-model-catalog) |
+| `PARAKEET_PRELOAD_MODELS` | empty | comma-separated `model` (fp32) or `model:quantization` to load and warm up before ready; requests must still name `model` |
+| `PARAKEET_MODEL_CACHE_SIZE` | `0` | keep at most N loaded models, and separately N loaded aligners, evicting the least recently used; `0` is no limit |
+| `PARAKEET_HF_OFFLINE` | `false` | never contact Hugging Face; every file must already be in the cache |
+
+**Startup**
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_WARMUP` | `true` | run one synthetic chunk through each preloaded model before ready |
+| `PARAKEET_WARMUP_SEC` | `5` | length of that chunk; `0` skips it |
+| `PARAKEET_WARMUP_TIMEOUT_SEC` | `120` | a warm-up that fails or takes longer fails startup |
+
+**Hardware and threads**
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_USE_GPU` | `true` | `true` requires CUDA, `auto` uses it when present, `false` runs on CPU |
+| `PARAKEET_GPU_DEVICE_ID` | `0` | CUDA device |
+| `PARAKEET_BATCHED` | on, unless `PARAKEET_USE_GPU=false` | micro-batch requests together (GPU); off runs parallel single requests (CPU) |
+| `PARAKEET_MAX_BATCH_SIZE` | `4` | largest micro-batch |
+| `PARAKEET_BATCH_WINDOW_MS` | `4` | how long to wait to fill a micro-batch |
+| `PARAKEET_ORT_INTRA_THREADS` | `1` on GPU; physical cores on CPU | ONNX Runtime threads per inference |
+| `PARAKEET_ORT_INTER_THREADS` | `1` | ONNX Runtime inter-op threads |
+| `PARAKEET_INFER_WORKERS` | logical CPUs ÷ intra-op threads, at most `4` | parallel inferences on CPU (`PARAKEET_BATCHED` off) |
+| `PARAKEET_AUDIO_WORKERS` | physical cores, at most `8` | audio decoding and chunking threads |
+| `PARAKEET_ALIGN_THREADS` | physical cores, at most `4` | word aligner threads |
+
+Core counts respect the affinity mask and the cgroup CPU quota; see
+[Running under an orchestrator](#running-under-an-orchestrator).
+
+**Chunking** (long audio is cut at pauses; each model's chunk length is set in
+the catalog)
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_CHUNK_MIN_SEC` | `20` | shortest chunk before neighbours are merged |
+| `PARAKEET_CHUNK_TRIM_SILENCE_SEC` | `3` | cut silences at least this long out of a chunk |
+| `PARAKEET_VAD_THRESHOLD` | `0.5` | Silero-VAD speech probability |
+| `PARAKEET_VAD_MIN_SILENCE_MS` | `400` | shortest pause to cut at |
+| `PARAKEET_VAD_SPEECH_PAD_MS` | `120` | padding kept around speech |
+
+**Words and numbers**
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed for [word timestamps](#word-timestamps) and [spoken numbers](#spoken-numbers) when a request sends none; empty uses them only when `language` is sent |
+| `PARAKEET_SPOKEN_NUMBERS` | `false` | spoken numbers for requests that don't send `spoken_numbers` |
+
+### Request limits
+
+A request over a limit is rejected with 413.
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_MAX_UPLOAD_BYTES` | 256 MiB | one uploaded file |
+| `PARAKEET_MAX_AUDIO_SECONDS` | `7200` (2 h) | one file's decoded duration |
+| `PARAKEET_MAX_REQUEST_CHUNKS` | `512` | chunks one request may produce |
+| `PARAKEET_MAX_BATCH_FILES` | `16` | files in one batch request |
+| `PARAKEET_MAX_BATCH_BYTES` | 512 MiB | total bytes in one batch request |
+| `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180` | per-request FFmpeg decode time (not a 413) |
+
+### Your own model catalog
+
+The models and aligners are defined in
+[`parakeet_service/models.yaml`](parakeet_service/models.yaml). Each model has
+its family, languages and chunk lengths, and per precision a Hugging Face repo,
+a pinned commit and the files that differ from the defaults:
+
+```yaml
+models:
+  parakeet-v2:
+    family: parakeet
+    onnx_asr_type: nemo-conformer-tdt
+    languages: *english            # from the file's `languages` section
+    chunk_target_sec: 25.0
+    chunk_max_sec: 30.0
+    quantizations:
+      int8:
+        repo: istupakov/parakeet-tdt-0.6b-v2-onnx
+        revision: "0bbb45a3365852604aef28b538a8f066f4ccaa85"
+        files:
+          encoder-model.onnx: encoder-model.int8.onnx
+          decoder_joint-model.onnx: decoder_joint-model.int8.onnx
+```
+
+The `aligners` section lists the [word aligners](#word-timestamps) the same
+way, plus the languages each aligns and how to spell a transcript for it
+(`aligners: {}` serves none). To serve a different set without rebuilding the
+image, point `PARAKEET_MODEL_CATALOG` at another file of the same shape. It
+**replaces** the built-in catalog, so copy the built-in file and edit it. The
+service checks it at startup and refuses to start on a mistake, naming it; it
+is read only then, so restart after changing it.
 
 On Kubernetes, keep it in a ConfigMap:
 
@@ -340,242 +510,42 @@ volumes:
       name: parakeet-models
 ```
 
-### Response formats
+### Running under an orchestrator
 
-`response_format` accepts `json` (default), `text`, `srt`, `vtt` and
-`verbose_json`. `verbose_json` returns segments, and word timestamps as well
-when `timestamp_granularities[]=word` is sent. `timestamp_granularities[]`
-takes `word` and `segment` (segments come either way); anything else is a 400.
+**CPU limits are quotas, not cpusets.** A Kubernetes `resources.limits.cpu` is
+invisible to `sched_getaffinity()` and `psutil`, which report the node's full
+core count, so without care a 4-core pod on a 64-core node would start 64 ONNX
+Runtime threads. Thread pools are sized from the cgroup quota instead, read
+from the process's own cgroup and its ancestors, so it is found under systemd
+`CPUQuota=` and `--cgroupns=host` as well. `/health` reports `cgroup_quota`
+next to the detected core counts under `cpu`; set `PARAKEET_ORT_INTRA_THREADS`
+to override.
 
-#### Word timestamps
+**Cold start.** Nothing loads at startup unless it is listed in
+`PARAKEET_PRELOAD_MODELS`. Each listed model is then warmed up before
+`/healthz` answers 200, so the first real request doesn't pay ONNX Runtime's
+setup. A warm-up that fails or exceeds `PARAKEET_WARMUP_TIMEOUT_SEC` fails
+startup rather than reporting a replica ready that can't run inference. The
+healthcheck `start_period` in the Dockerfiles and `docker-compose.yml` allows
+for model load plus that timeout; raise both together. With a pre-seeded cache,
+set `PARAKEET_HF_OFFLINE=true` to skip the Hugging Face revision check each
+start makes.
 
-Word times can come from a forced aligner rather than from Parakeet. Parakeet
-decides the words, then a character-level CTC model finds where each one
-starts and ends, WhisperX-style but on ONNX Runtime with no PyTorch. Parakeet's
-own word times sit on 80 ms frames and their ends are estimated; aligned times
-sit on 20 ms frames and the ends come from the audio.
+## Performance
 
-A request names the aligner, as it names the model: send the form field
-`aligner`, and optionally `aligner_quantization` (else the aligner's default),
-or both at once as `aligner=mms-300m-forced-aligner:fp32`.
-There is no default aligner: a request that names none gets Parakeet's times.
-`GET /v1/aligners` lists them, like `GET /v1/models`:
-
-| Aligner | Languages | Error, start / end (English TTS) | License |
-|---|---|---|---|
-| [`mms-300m-forced-aligner`](https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX) | `en` | 37 / 106 ms | **CC-BY-NC-4.0: non-commercial only** |
-| [`wav2vec2-large-xlsr-53-english`](https://huggingface.co/Xenova/wav2vec2-large-xlsr-53-english) | `en` | 48 / 104 ms | Apache-2.0 (the model it exports) |
-| [`omnilingual-ctc-300m`](https://huggingface.co/OpenVoiceOS/omnilingual-asr-ctc-300m-onnx) | `en` and Parakeet v3's other 24 | 45 / 117 ms | Apache-2.0 |
-| [`wav2vec2-base-960h`](https://huggingface.co/onnx-community/wav2vec2-base-960h-ONNX) | `en` | 57 / 131 ms | Apache-2.0 |
-
-For English, use `mms-300m-forced-aligner`: it is the most accurate, and on
-real audiobook narration it sounds clearly the best. Its licence is
-non-commercial; for commercial use, `wav2vec2-large-xlsr-53-english` is the
-next best. `wav2vec2-base-960h` is the smallest and fastest, but the least
-accurate. Each is offered at `int8` (the default) and `fp32`, which is about as
-accurate and 4x the download.
-
-```python
-transcript = client.audio.transcriptions.create(
-  model="parakeet-v3",
-  file=audio_file,
-  response_format="verbose_json",
-  timestamp_granularities=["word"],
-  language="en",
-  extra_body={"aligner": "mms-300m-forced-aligner"},  # non-commercial licence
-)
-```
-
-An unknown aligner or quantization, or an aligner that does not align the
-request's language, is a 400 naming what is available. Which aligners exist,
-and the languages each aligns, is set in the
-[model catalog](#your-own-model-catalog).
-
-* **Language.** `language` is a bare ISO 639-1 code (`en`, `fr`), or empty or
-  `auto` for the default; anything else (`en-US`, `EN`, `English`) is a 400 on
-  every request. For word timestamps it must be one the aligner aligns. A
-  request without `language` (or with `auto`) is aligned as
-  `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it: nothing
-  detects the language. An English-only model's words (`parakeet-v2`,
-  `whisper-*.en`) are aligned as English whatever `language` says. A chunk
-  whose words are mostly in another alphabet than the aligner's (Cyrillic,
-  Greek, ...) keeps Parakeet's times, but other Latin-script languages sent
-  without `language` are aligned as English — send `language`. Whisper has no
-  word times of its own, so it returns words only when the request names an
-  aligner, and a multilingual Whisper model only when the request also names
-  the language. If a chunk can't be aligned at all, `words` is null; a word the
-  aligner can't place sits between its aligned neighbours.
-* **Numbers and symbols** are aligned as spoken by the English aligners
-  (`mms-300m-forced-aligner`, `wav2vec2-large-xlsr-53-english`,
-  `wav2vec2-base-960h`). `omnilingual-ctc-300m` drops numbers in every
-  language, English included: a number keeps Parakeet's times, and the words
-  around it are aligned as usual. As said in English: `42` as "forty two", `2026` as
-  "twenty twenty six", `$5 million` and `$5m` as "five million dollars", `-5`,
-  `50%`, `21st`, and units like `20lb`, `5kg`, `70mph`, `20°C`; accents are
-  folded (`café`). A number is read together with the words that change how it
-  is said, the same way [spoken numbers](#spoken-numbers) reads it (on or off):
-  `5 May` as "the fifth of May", `July 4` as "July fourth", `90 mph` as "ninety
-  miles per hour", `715 a.m.` as "seven fifteen a.m.", `100-200` as "one
-  hundred to two hundred". Only timing depends on this — the text is never
-  changed — so money heard as weight (`25 lb` for "twenty five pounds") still
-  lines up. A count in year range (`1500`) is read as a year, so if it was said
-  "one thousand five hundred" it starts a little late. A lone letter is looked
-  for as its name, which is how it sounds (`R&D` as "ar and dee", `Vitamin C`
-  as "vitamin see", the "p" of `£11.40p`).
-* **Transcript mistakes.** On clean speech, a word Parakeet missed or got wrong
-  does not drag its neighbours' times (as in MMS forced alignment, the gaps
-  between words can absorb speech the transcript lacks); in heavy noise it
-  occasionally still does. An invented word needs somewhere to go: in a pause
-  it takes the pause, but a long one invented in the middle of continuous
-  speech pushes its neighbours aside.
-
-The aligner only runs when the request names one and words are returned (and
-for [spoken numbers](#spoken-numbers)), one request at a time on its own thread
-pool so it never holds up other requests' audio decoding. Each aligner
-downloads on the first request that names it (int8: ~320 MB, or ~95 MB for
-`wav2vec2-base-960h`; fp32 is 4x) and runs on CPU, adding roughly 3 s per 30 s
-of audio on a 4-core machine (2 s for `wav2vec2-base-960h`). If a download
-fails, word times fall back to Parakeet's and the load is retried every 5
-minutes; `/health` reports each aligner's state per
-quantization under `aligner`.
-
-| Variable | Default | |
+| Workload | CPU: i7-12700KF, int8 | GPU: RTX 3090, fp32 |
 |---|---|---|
-| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers: a bare ISO 639-1 code, or empty to use them only when `language` is sent |
-| `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
+| One 300 s file | 10.41 s (27.2× real time) | 1.37 s (205.9×) |
+| 16 × 10 s files at once | 39.3× throughput | 200.3× throughput |
 
-#### Comparing models and aligners by ear
+Measured in 1.x, with the `parakeet-v3` exports 2.0 replaced. The speed comes
+from cutting long audio at pauses with Silero-VAD and running the chunks in
+parallel (micro-batched on GPU), decoding each upload once (16 kHz PCM WAV
+without FFmpeg at all), and sizing every thread pool to the CPUs actually
+available. [OPTIMIZATION.md](OPTIMIZATION.md) has the method, what didn't
+work, the GPU sweeps, and accuracy benchmarks against Whisper.
 
-With `PARAKEET_COMPARE_UI=true`, `GET /compare` serves a page for choosing
-between them by listening. Pick an audio file and cut it to a clip (From and
-To, in seconds), then add rows: a model at a quantization, with or without an
-aligner (`parakeet-v2:int8`; `parakeet-v2:int8` + `mms-300m-forced-aligner:int8`;
-...). **Compare** sends the clip through `/v1/audio/transcriptions` once per
-row, one row at a time, and lines up each row's words under the clip's
-waveform. Click a word to hear exactly the span that row gave it; the same word
-is then picked out in every row, close up and in a table of starts and ends.
-The arrow keys step through words and switch rows, Enter replays, and playback
-can be slowed to ½×. A file of exact word times, as synthetic speech has (JSON:
-a verbose_json response or its `words`; or SRT/VTT with one cue per word), adds
-a dashed reference row and each row's average error against it.
-
-The browser decodes the file and sends only the clip, as a 16 kHz WAV, so the
-page and the server hear the same samples. The page is off by default: each
-row is a full transcription, and loads any model or aligner it names, which
-then stays loaded (see `PARAKEET_MODEL_CACHE_SIZE`).
-
-| Variable | Default | |
-|---|---|---|
-| `PARAKEET_COMPARE_UI` | `false` | serve the `/compare` page |
-
-#### Spoken numbers
-
-Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
-may come back as `£25` or `25 lb`, "five dollars" as `$5`, "ten thirty" as
-`1030`, and "nine one one" as `911`. With the form field `spoken_numbers=true`
-(OpenAI SDK: `extra_body={"spoken_numbers": True}`), or
-`PARAKEET_SPOKEN_NUMBERS=true` for requests that don't send it, English
-transcripts (text, segments, words, every response format and the batch
-endpoint) say numbers, money and units in words, the way they were said:
-
-| Parakeet wrote | Transcript says |
-|---|---|
-| `$5`, `cost$25` | five dollars, cost twenty-five dollars |
-| `£25`, `25 lb` | twenty-five pounds |
-| `$5 million`, `$5m` | five million dollars |
-| `20°C`, `50%`, `21st` | twenty degrees Celsius, fifty percent, twenty-first |
-| `5 May`, `90 mph` | the fifth of May, ninety miles per hour |
-| `MP3`, `COVID-19`, `5m`, `12C` | unchanged: names, or ambiguous |
-
-Different speech often comes out as the same text — `£2.10` is "two pounds
-ten", "two pounds and ten pence" or "two ten"; `1500` is "fifteen hundred" or
-"one thousand five hundred"; `911` is "nine one one" or "nine eleven" — so each
-number's possible readings are scored against its stretch of the audio by the
-request's [aligner](#word-timestamps) (`aligner=`, as for word times), and the
-one that was said is kept. The choice was tuned and measured with
-`wav2vec2-base-960h`; the other aligners have not been measured for it yet.
-Likely mishearings of an amount are scored too (`£1.10` for "two pounds ten",
-`€3` for "thirty euros"; not of a time, date, ordinal or code), and one
-replaces Parakeet's number only when the audio prefers it by a clear margin.
-Word times follow the spoken words.
-
-* **Cost.** Almost every number has several readings or a likely mishearing
-  (97% of the chunks with a number in our test corpus), so the aligner model
-  runs for most chunks that contain a number: roughly 2 s per 30 s chunk on a
-  4-core CPU, plus 0.5–0.9 s to choose on a dense 60–75 s chunk (a number every
-  few seconds; prices cost the most). Those requests queue on the aligner's
-  single worker with word requests, so audio with numbers in it is heard at
-  about 13x real time however many requests are waiting. Requests with no
-  number, or whose numbers have nothing to decide (`6pm`, `6 pm`), are not held
-  up. With no aligner named, or the model unavailable, each number's
-  first reading is used — a fixed default, usually the most common one ("two
-  pounds ten", "ten to fifteen"), though a code is read as an amount (`911` as
-  "nine hundred eleven"), and so are a time and a year before 1100 (`1030` as
-  "one thousand thirty", `1066` as "one thousand sixty-six") — and Parakeet's
-  number is kept.
-* **Language.** English only, decided as for word timestamps: a request without
-  `language` is taken as `PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you
-  change it. A chunk mostly in another alphabet is left as written, but
-  Latin-script languages sent without `language` are rewritten as if English —
-  set the default empty if you serve them.
-
-| Variable | Default | |
-|---|---|---|
-| `PARAKEET_SPOKEN_NUMBERS` | `false` | spoken numbers for requests that don't send `spoken_numbers`; `true` says them in every English transcript unless the request sends `spoken_numbers=false` |
-
-### Batch transcription
-
-`POST /v1/audio/transcriptions/batch` takes several `files=` parts in one
-request and returns `{"results": [{"filename", "text", "duration"}, ...],
-"batch_size": N}`. It takes the same `model`, `quantization`,
-`aligner`, `aligner_quantization` and `spoken_numbers` fields as the
-single-file endpoint, but no `language` or `response_format`. Requests are
-bounded by `PARAKEET_MAX_BATCH_FILES` (16) and `PARAKEET_MAX_BATCH_BYTES`
-(512 MiB); see the env knob table in
-[OPTIMIZATION.md](OPTIMIZATION.md#env-knobs) for the per-request limits that
-apply to both endpoints.
-
-### Interactive API docs
-
-The server exposes Swagger UI for trying requests from the browser, including
-picking a model variant per request.
-Access it at: **[http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)**
-
-To compare models and aligners on your own audio by ear, see
-[the compare page](#comparing-models-and-aligners-by-ear).
-
-## 🔌 Open WebUI Integration
-
-**This project provides out-of-the-box compatibility with [Open WebUI](https://openwebui.com/)**, serving as a drop-in replacement for OpenAI's speech-to-text API. Experience lightning-fast, local transcription across 25 languages with automatic language detection!
-
-### Setup Instructions
-
-1.  **Start the Parakeet Server** (if not already running):
-    ```bash
-    conda activate parakeet-onnx
-    python server.py   # on CPU: PARAKEET_USE_GPU=false python server.py
-    ```
-    The server will be available at `http://127.0.0.1:5092`
-
-2.  **Configure Open WebUI**:
-    - Navigate to **Open WebUI Settings -> Audio**
-    - Set **STT Engine** to `OpenAI`
-    - Set **OpenAI Base URL** to `http://127.0.0.1:5092/v1`
-    - Set **OpenAI API Key** to `sk-no-key-required`
-    - Set **STT Model** to `parakeet-v3` (required: the server has no default model)
-    - Click **Save**
-
-3.  **Start Using Voice!**
-    - All voice interactions in Open WebUI will now be transcribed locally
-    - Enjoy real-time transcription speeds (up to 30x faster than real-time on modern CPUs)
-    - Automatic language detection across all 25 supported languages
-    - Complete privacy - all processing happens locally on your machine
-
-## Model details
-
-Models and aligners are downloaded on first use, or at startup for `PARAKEET_PRELOAD_MODELS`, and cached under `models/` (`PARAKEET_MODELS_DIR`). Which ones exist is set by the [model catalog](#your-own-model-catalog); there is no default model.
-
-## 🙏 Acknowledgments
+## Acknowledgments
 
 This project stands on the shoulders of giants and wouldn't be possible without:
 

@@ -1,4 +1,10 @@
-# Optimization Report: `stt-api`
+# Optimization report (1.x)
+
+How the 1.x FastAPI service replaced the original Flask one, and what was
+measured along the way. It is kept as history: every figure here was measured
+on the `parakeet-v3` exports 1.x served (istupakov fp32 and int8, grikdotnet
+fp16). 2.0 serves Olicorne's export instead, which has **not been tested on a
+GPU**. For current settings, see [the README](README.md#configuration).
 
 ## TL;DR
 
@@ -18,9 +24,9 @@ new FastAPI service inspired by `parakeet-flash`. On a single i7-12700KF
 The biggest CPU win is on long files: parallel Silero‑VAD chunking + a fan-out
 inference pool turn a 5-minute clip from 18 s of inference into 10 s.
 
-With `onnxruntime-gpu==1.26.0` installed in the same conda env and CUDA
-provider binding validated from the live ORT sessions, the default backend is
-now the best stable RTX 3090 profile: FP32 + GPU micro-batching.
+With `onnxruntime-gpu==1.26.0` and CUDA provider binding validated from the
+live ORT sessions, the best stable RTX 3090 profile was FP32 + GPU
+micro-batching.
 
 | Workload                | CPU optimized      | GPU profile        | Δ        |
 |-------------------------|--------------------|--------------------|----------|
@@ -29,25 +35,12 @@ now the best stable RTX 3090 profile: FP32 + GPU micro-batching.
 | **300 s file (single)** | 10.41 s / 27.2×    | **1.37 s / 205.9×** | **+7.6×** |
 | 16× 10 s concurrent     | 39.3× throughput   | **200.3× throughput** | **+5.1×** |
 
-Default GPU command:
-
-```bash
-PARAKEET_USE_GPU=true \
-PARAKEET_PRELOAD_MODELS=parakeet-v3 \
-PARAKEET_BATCHED=1 \
-PARAKEET_MAX_BATCH_SIZE=4 \
-PARAKEET_BATCH_WINDOW_MS=4 \
-PARAKEET_ORT_INTRA_THREADS=1 \
-PARAKEET_AUDIO_WORKERS=8 \
-python server.py
-```
-
-CPU override:
+That profile is now the default, so a plain `python server.py` on a GPU host
+runs it. The CPU runs used:
 
 ```bash
 PARAKEET_USE_GPU=false \
 PARAKEET_PRELOAD_MODELS=parakeet-v3:int8 \
-PARAKEET_BATCHED=0 \
 PARAKEET_ORT_INTRA_THREADS=12 \
 python server.py
 ```
@@ -57,8 +50,8 @@ python server.py
 The rule was to establish a measured baseline before changing code, and to
 identify bottlenecks with evidence:
 
-1. **Baseline**: legacy `app.py` running on
-   Waitress, default settings, warmed up.
+1. **Baseline**: the Flask `app.py` (removed in 2.0) running on Waitress,
+   default settings, warmed up.
 2. **Profile**: looked at where time was going during a 300 s clip.
    The legacy server spawns `ffmpeg -loglevel … -filter silencedetect` to
    find chunks, then runs **sequential** per-chunk inference. Inference
@@ -71,7 +64,7 @@ identify bottlenecks with evidence:
    - Cross-request micro-batching (`recognize([w1..wN])`).
    - Parallel single-item inference pool (`InferencePool`).
    - Pin to P-cores only via `taskset`.
-  - GPU provider setup and model/worker/batch sweeps on RTX 3090.
+   - GPU provider setup and model/worker/batch sweeps on RTX 3090.
 
 ## Findings
 
@@ -152,6 +145,7 @@ identify bottlenecks with evidence:
 stt-api/
 ├── server.py                    # uvicorn entry point (port 5092)
 ├── pin_pcores.sh                # Optional P-core taskset wrapper
+├── benchmark.py                 # Older standalone benchmark (see below)
 └── parakeet_service/
     ├── config.py                # Env knobs, CPU detection, catalog loading
     ├── models.yaml              # Model and aligner catalog
@@ -167,115 +161,13 @@ stt-api/
     └── main.py                  # FastAPI lifespan
 ```
 
-Key endpoints:
-
-- `POST /v1/audio/transcriptions` — multipart `file=`, `model=`, optional
-  `quantization=fp32|fp16|int8` (default `fp32`),
-  `response_format=json|text|srt|vtt|verbose_json`,
-  `timestamp_granularities[]=segment|word`, `language`, `aligner`,
-  `aligner_quantization`, `spoken_numbers`.
-- `POST /v1/audio/transcriptions/batch` — multiple files in one call.
-- `GET /v1/models`, `GET /v1/aligners` — what the catalog serves.
-- `GET /health`, `GET /healthz`.
-- `GET /compare` — a page comparing models and aligners by ear, with `PARAKEET_COMPARE_UI=true`.
-
-## Env knobs
-
-All optional. Defaults are tuned for an 8-core CPU.
-
-| Variable                   | Default      | Meaning                                                  |
-|----------------------------|--------------|----------------------------------------------------------|
-| `PARAKEET_HOST`            | `0.0.0.0`    | bind host                                                |
-| `PARAKEET_PORT`            | `5092`       | bind port (matches the legacy service)                   |
-| `PARAKEET_MODELS_DIR`      | `./models`   | Hugging Face cache directory for the ONNX weights        |
-| `PARAKEET_MODEL_CATALOG`   | built-in     | YAML file replacing `parakeet_service/models.yaml`; validated at startup |
-| `PARAKEET_PRELOAD_MODELS`  | empty        | comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before ready; requests must still name `model=` |
-| `PARAKEET_INFER_WORKERS`   | `min(4, logical CPUs ÷ intra-op threads)` | parallel ORT workers in `InferencePool` when `PARAKEET_BATCHED=0`; logical CPUs are clamped to the cgroup quota |
-| `PARAKEET_BATCHED`         | `1`, or `0` with `PARAKEET_USE_GPU=false` | `1` → use GPU-friendly `BatchWorker`; `0` → `InferencePool` |
-| `PARAKEET_USE_GPU`         | `true`       | `true` / `auto` / `false`                                |
-| `PARAKEET_GPU_DEVICE_ID`   | `0`          | CUDA device for ORT                                      |
-| `PARAKEET_CHUNK_MIN_SEC`   | `20`         | min chunk length before merge                            |
-| `PARAKEET_CHUNK_TRIM_SILENCE_SEC` | `3`   | silence gaps at least this long are cut out of a chunk   |
-| `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
-| `PARAKEET_VAD_MIN_SILENCE_MS` | `400`     | min silence between chunks                               |
-| `PARAKEET_VAD_SPEECH_PAD_MS` | `120`      | pad around speech segments                               |
-| `PARAKEET_MODEL_CACHE_SIZE` | `0`        | max loaded models kept, and separately max loaded aligners; least-recent evicted, `0` = unbounded |
-| `PARAKEET_MAX_BATCH_SIZE`  | `4`          | max batch (only used when `PARAKEET_BATCHED=1`)          |
-| `PARAKEET_BATCH_WINDOW_MS` | `4`          | batch collection window                                  |
-| `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |
-| `PARAKEET_ORT_INTER_THREADS` | `1`        | ORT inter-op threads                                     |
-| `PARAKEET_AUDIO_WORKERS`   | `min(8, physical)` | audio decode/chunk worker pool                     |
-| `PARAKEET_HF_OFFLINE`      | `false`      | skip the Hugging Face revision check; needs a pre-seeded cache |
-| `PARAKEET_WARMUP`          | `true`       | run one synthetic inference before reporting ready       |
-| `PARAKEET_WARMUP_SEC`      | `5`          | warm-up audio length; `0` disables                       |
-| `PARAKEET_WARMUP_TIMEOUT_SEC` | `120`     | warm-up bound; a failed or timed-out warm-up fails startup |
-| `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
-| `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
-| `PARAKEET_COMPARE_UI`      | `false`      | serve the `/compare` page (README, word timestamps)      |
-| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en`  | language assumed for alignment and spoken numbers when a request sends none (README, word timestamps) |
-| `PARAKEET_ALIGN_THREADS`   | `min(4, physical cores)` | CPU threads for the word aligner             |
-| `PARAKEET_SPOKEN_NUMBERS`  | `false`      | spoken numbers for requests that don't send `spoken_numbers` (README, spoken numbers) |
-
-Chunk lengths are per model (`chunk_target_sec` / `chunk_max_sec` in
-`models.yaml`), not environment variables: Parakeet v3 chunks at 60/75 s, Whisper and
-Parakeet v2 at 25/30 s. Whisper's encoder only sees 30 s, and Parakeet v2 drops
-whole stretches of speech from chunks of 45 s or more
-([#36](https://github.com/scagood/stt-api/issues/36)).
-
-Request limits, all rejected with `413`:
-
-| Variable                   | Default      | Meaning                                                  |
-|----------------------------|--------------|----------------------------------------------------------|
-| `PARAKEET_MAX_UPLOAD_BYTES`| `268435456` (256 MiB) | max size of a single uploaded file             |
-| `PARAKEET_MAX_AUDIO_SECONDS` | `7200` (2 h) | max decoded duration of a single file                  |
-| `PARAKEET_MAX_REQUEST_CHUNKS` | `512`     | max chunks one request may produce after VAD chunking    |
-| `PARAKEET_MAX_BATCH_FILES` | `16`         | max files in one `/v1/audio/transcriptions/batch` call   |
-| `PARAKEET_MAX_BATCH_BYTES` | `536870912` (512 MiB) | max total bytes in one batch call              |
-
-### Container CPU limits
-
-Thread pools are sized from the cgroup CPU quota when one is set, falling back
-to the affinity mask and physical core count otherwise. This matters under an
-orchestrator: a Kubernetes `resources.limits.cpu` is a CFS *quota*, not a
-cpuset, so `sched_getaffinity()` and `psutil` both report the node's full core
-count from inside a limited container. Without the quota check, a 4-core pod on
-a 64-core node starts 64 ORT intra-op threads and thrashes.
-
-`/health` reports what was detected — `cgroup_quota` alongside the raw
-`detected_physical` / `detected_logical` — so a mis-sized pool is visible
-rather than silent. Set `PARAKEET_ORT_INTRA_THREADS` explicitly to override.
-
-## Running
-
-```bash
-# Conda-isolated install (installs onnxruntime-gpu; for CPU-only, see the
-# README's Conda section)
-conda create -n parakeet-v3 python=3.14 -y
-conda activate parakeet-v3
-pip install -r requirements.txt
-
-# Run
-python server.py
-# or pinned to P-cores (NOT recommended on this hardware, see Findings)
-./pin_pcores.sh python server.py
-
-# Default RTX 3090 profile
-PARAKEET_USE_GPU=true \
-PARAKEET_PRELOAD_MODELS=parakeet-v3 \
-PARAKEET_BATCHED=1 \
-PARAKEET_MAX_BATCH_SIZE=4 \
-PARAKEET_BATCH_WINDOW_MS=4 \
-PARAKEET_ORT_INTRA_THREADS=1 \
-python server.py
-```
-
 ## Reproducing the benchmark
 
 The bench corpus (three real recordings of 10 s, 60 s and 300 s) and its
 `bench.py`, which measured sequential mean/p50/p95 plus concurrent wall-clock
 throughput, were never committed, so these runs can't be reproduced from this
-repo. `benchmark.py` at the root is a separate script that reads MP3s from a
-hard-coded folder.
+repo. `benchmark.py` at the root is a separate, older script: it takes no
+options, and its server URL and audio folder (`/home/op/mp3`) are hard-coded.
 
 ## GPU sweep highlights
 
@@ -290,6 +182,77 @@ sequential run per duration.
 | FP16 pool w4 (exploratory) | 217.0× | 337.3× | 134.7× | 109.7× | simple low-risk GPU profile |
 | FP32 pool w4 (exploratory) | 197.1× | 228.6× | 100.3× | 244.3× | OOMed under final concurrent repeat |
 | INT8 pool w1 on CUDA | 8.8× | 8.9× | 8.6× | 8.7× | avoid on GPU |
+
+## Accuracy and speed benchmarks
+
+For the current export's accuracy, see [the README](README.md#choosing-a-model).
+
+### LibriSpeech test-clean (Verified Ground Truth) ⭐
+
+Benchmarked on **LibriSpeech test-clean** dataset with professionally verified human transcriptions. This provides reliable, reproducible accuracy metrics.
+
+**Test Environment:** CPU-only inference, 50 samples (~350 seconds of audio)
+
+| Model | Precision | Accuracy | WER | CER | Speedup (RTF) |
+|-------|-----------|----------|-----|-----|---------------|
+| **Parakeet TDT 0.6B v3** | INT8 | **97.84%** | 2.16% | 0.56% | **18.41x** (0.054) |
+| **Parakeet TDT 0.6B v3** | FP16 | **97.84%** | 2.16% | 0.56% | **18.82x** (0.053) |
+| **Parakeet TDT 0.6B v3** | FP32 | **97.84%** | 2.16% | 0.56% | **19.42x** (0.052) |
+| Whisper Large v3* | FP16 | ~95-96% | ~4-5% | ~2-3% | varies |
+
+> *Whisper Large v3 benchmarks from published literature on LibriSpeech test-clean. Actual results vary by implementation and hardware.
+
+**Key Findings:**
+- All three precisions scored the same (97.84%) on these 50 short samples. On
+  longer audio the int8 export dropped words after silences, and it was ~4 WER
+  points worse on Spanish (below)
+- Real-time factor (RTF) of ~0.05 means 20x faster than real-time
+- Competitive with Whisper Large v3 accuracy with significantly faster CPU inference
+
+---
+
+### Parakeet TDT vs Faster Whisper
+
+We compare the performance of **Parakeet TDT (CPU)** against **faster-whisper (GPU & CPU)**.
+
+The metric used is **Speedup Factor** (Audio Duration / Processing Time). Higher is better.
+
+| Implementation | Hardware | Model | Precision | Speedup |
+| --- | --- | --- | --- | --- |
+| **Parakeet TDT** (Ours) | **CPU** (i7-12700KF) | **TDT 0.6B v3** | **int8** | **~29.7x** |
+| **Parakeet TDT** (Ours) | **CPU** (i7-4790) | **TDT 0.6B v3** | **int8** | **~17.0x** |
+| faster-whisper | GPU (RTX 3070 Ti) | Large-v2 | int8 | 13.2x |
+| faster-whisper | GPU (RTX 3070 Ti) | Large-v2 | fp16 | 12.4x |
+| faster-whisper | CPU (i7-12700K) | Small | int8 | 7.6x |
+| faster-whisper | CPU (i7-12700K) | Small | fp32 | 4.9x |
+
+*   **Parakeet TDT**: Benchmarked on the CPUs listed, with ONNX Runtime INT8.
+*   **faster-whisper**: Benchmarks from [official faster-whisper documentation](https://github.com/SYSTRAN/faster-whisper).
+
+### Detailed Parakeet Performance
+
+| Metrics | Result |
+| --- | --- |
+| **Average Speedup** | **29.7x** |
+| **Real Time Factor (RTF)** | **0.033** |
+| **Max Speedup** | **~30x** |
+
+### Extended Multilingual Benchmark (YouTube Samples)
+
+Additional benchmark on real-world YouTube content across multiple languages:
+
+| Language | Model Variant | Latency (s) | Speedup (RTF) | WER | CER |
+| --- | --- | ---: | ---: | ---: | ---: |
+| English | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 70.60 | 20.32x (0.049) | 5.13% | 2.35% |
+| English | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 135.43 | 10.59x (0.094) | 5.48% | 2.83% |
+| English | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 112.80 | 12.72x (0.079) | 5.53% | 2.85% |
+| English | Whisper-Large-v3 (DeepInfra) | 53.45 | 26.84x (0.037) | 4.25% | 3.91% |
+| Spanish | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 29.92 | 18.64x (0.054) | 19.45% | 13.79% |
+| Spanish | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 48.52 | 11.49x (0.087) | 15.31% | 11.33% |
+| Spanish | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 38.99 | 14.30x (0.070) | 15.31% | 11.33% |
+| Spanish | Whisper-Large-v3 (DeepInfra) | 15.79 | 35.30x (0.028) | 20.70% | 18.05% |
+
+> ⚠️ **Note:** YouTube subtitle references may contain errors. For verified accuracy, see LibriSpeech benchmark above.
 
 ## Future work
 

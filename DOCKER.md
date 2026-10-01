@@ -1,6 +1,6 @@
 # Docker Deployment Guide
 
-This document covers Docker deployment options for Parakeet TDT transcription service.
+How to run stt-api in Docker, from the published images or built from this repo.
 
 ## Quick Start
 
@@ -14,7 +14,14 @@ GPU image for `linux/amd64`.
 ```bash
 docker run -d --name parakeet-cpu -p 5092:5092 -v parakeet-models:/app/models \
     -e PARAKEET_PRELOAD_MODELS=parakeet-v3 ghcr.io/scagood/stt-api:latest-cpu
+
+docker run -d --name parakeet-gpu -p 5092:5092 --gpus all -v parakeet-models:/app/models \
+    -e PARAKEET_PRELOAD_MODELS=parakeet-v3:fp16 ghcr.io/scagood/stt-api:latest-gpu
 ```
+
+With `PARAKEET_PRELOAD_MODELS` set, the server downloads and loads that model
+before it reports ready; without it, the first request for each model waits for
+the download.
 
 ### CPU Deployment (Recommended for most users)
 
@@ -66,8 +73,18 @@ docker run -d --name parakeet-gpu -p 5092:5092 --gpus all \
 | `PARAKEET_PRELOAD_MODELS` | empty | Comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before `/healthz` reports ready, e.g. `parakeet-v3` or `parakeet-v3:fp16`. Requests must still name `model=`. `docker-compose.yml` sets `parakeet-v3`. |
 
 The images also set the CPU or GPU defaults (`PARAKEET_USE_GPU`,
-`PARAKEET_BATCHED`, ...). For every other variable, see
-[OPTIMIZATION.md](OPTIMIZATION.md#env-knobs) and the README.
+`PARAKEET_BATCHED`, ...). Every other variable is in
+[the README's configuration section](README.md#configuration). Pass them with
+`docker run -e NAME=value`, or for compose, in a `docker-compose.override.yml`
+next to `docker-compose.yml`, which compose merges in automatically:
+
+```yaml
+services:
+  parakeet-cpu:
+    environment:
+      PARAKEET_PRELOAD_MODELS: "parakeet-v3:int8"
+      PARAKEET_MODEL_CACHE_SIZE: "2"
+```
 
 ### Persistent Model Cache
 
@@ -84,14 +101,11 @@ docker volume inspect parakeet-models
 docker volume rm parakeet-models
 ```
 
-## Files Created
-
-| File | Description |
-|------|-------------|
-| `Dockerfile.cpu` | CPU-only image (Python 3.14 slim) |
-| `Dockerfile.gpu` | GPU image (Python 3.14 slim; CUDA/cuDNN from the `onnxruntime-gpu` wheels) |
-| `docker-compose.yml` | Orchestration for both variants |
-| `.dockerignore` | Excludes unnecessary files from build |
+The volume must be writable even when every model is already in it: each load
+links the model's files into a temporary folder there. To run with
+`PARAKEET_HF_OFFLINE=true`, seed it first: start once online with
+`PARAKEET_PRELOAD_MODELS` listing every model you serve, and send one word
+request naming each aligner your clients use, since aligners aren't preloaded.
 
 ## Testing
 
@@ -118,5 +132,9 @@ curl -X POST http://localhost:5092/v1/audio/transcriptions \
 - Run: `docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi`
 
 **Out of memory:**
-- CPU image requires ~2GB RAM
-- GPU image requires ~4GB VRAM
+- With `parakeet-v3` loaded, the server uses about 2.5 GB of RAM at fp32 and
+  about 1 GB at int8. Each aligner adds about 0.5 GB at int8, and every other
+  model loaded adds its own share; cap them with `PARAKEET_MODEL_CACHE_SIZE`.
+  (Measured on CPU with a short clip; long audio needs more.)
+- GPU memory hasn't been measured for the current `parakeet-v3` export. On a
+  GPU, `fp16` roughly halves it.
