@@ -1,17 +1,23 @@
-# Parakeet TDT Transcription with ONNX Runtime
+# stt-api
 
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Parakeet TDT** is a high-performance implementation of NVIDIA's [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) model using [ONNX Runtime](https://onnxruntime.ai/), designed for ultra-fast inference on CPU.
+An OpenAI-compatible speech-to-text server on [ONNX Runtime](https://onnxruntime.ai/).
+It serves NVIDIA's [Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+v3 (25 European languages) and v2 (English), and OpenAI's Whisper, on CPU or
+GPU. Point an OpenAI client at it and call `/v1/audio/transcriptions`.
 
-This implementation achieves exceptional real-time speeds, outperforming standard [openai/whisper](https://github.com/openai/whisper) and competing directly with GPU-accelerated [faster-whisper](https://github.com/SYSTRAN/faster-whisper) implementations while running entirely on consumer CPUs. The efficiency is achieved through the architectural advantages of the Token-and-Duration Transducer (TDT) model combined with 8-bit quantization.
+Parakeet's Token-and-Duration Transducer (TDT) architecture lets it transcribe
+many times faster than real time on a consumer CPU, and faster still on a GPU; see
+[Benchmark](#benchmark). The project started as a Parakeet v3 server, which is
+why its settings are named `PARAKEET_*`.
 
-## 🚀 Optimized FastAPI service (v2)
+## 🚀 The FastAPI service
 
-A refactored async service lives under [`parakeet_service/`](parakeet_service/)
-and is started via [`server.py`](server.py). It keeps the OpenAI-compatible
-contract of the previous Flask service but adds:
+The service lives under [`parakeet_service/`](parakeet_service/) and starts
+with [`server.py`](server.py). Compared with the Flask service it replaced in
+1.x, it adds:
 
 - In-process audio decode (single `ffmpeg` per request, none per chunk)
 - **Silero-VAD auto-chunking** that splits long files on pause midpoints
@@ -19,16 +25,16 @@ contract of the previous Flask service but adds:
   multiple threads — both for concurrent requests and for the chunks of
   one long request
 
-Compared to the legacy Flask+Waitress service on a 12700KF CPU:
+Compared with the Flask+Waitress service on a 12700KF CPU (1.x, int8):
 
 | Workload                | Legacy            | Optimized          | Δ        |
 |-------------------------|-------------------|--------------------|----------|
 | 300 s file (single)     | 17.96 s / 15.7×   | **10.41 s / 27.2×**| **+73%** |
 | 16× 10 s concurrent     | 34.6× throughput  | **39.3× throughput**| +13%    |
 
-The service defaults to CUDA with GPU micro-batching. The numbers below were
-measured at FP32, the default precision; on GPU, `quantization=fp16` halves
-VRAM at the same output.
+The service defaults to CUDA with GPU micro-batching. The GPU numbers below
+were measured in 1.x on an RTX 3090 at FP32, the default precision, with the
+export 2.0 replaced; on GPU, `quantization=fp16` roughly halves VRAM.
 
 | Workload                | CPU optimized      | GPU profile (FP32) | Δ        |
 |-------------------------|--------------------|--------------------|----------|
@@ -39,34 +45,33 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full benchmark, design
 rationale, and tunable env knobs.
 
 ```bash
-python server.py                  # serve on :5092
-
-# CPU override
-PARAKEET_USE_GPU=false \
-PARAKEET_BATCHED=0 \
-python server.py
+python server.py                          # GPU (the default), on :5092
+PARAKEET_USE_GPU=false python server.py   # CPU
 ```
 
-## ⚡ Lower-latency WAV uploads
+## ⚡ WAV uploads skip FFmpeg
 
-The server now includes a faster request path for short PCM WAV uploads with no API changes required:
-
-- WAV duration is read directly from the WAV header instead of spawning `ffprobe`
-- Already-normalized **16 kHz mono PCM WAV** uploads skip FFmpeg conversion entirely
-- Short unchunked PCM WAV uploads can be decoded and resampled **in process** before being passed straight to ONNX Runtime
-- FFmpeg remains the fallback for unsupported, compressed, non-WAV, or chunked inputs
-
-On a 20-file English/Spanish Chatterbox WAV benchmark corpus, this reduced endpoint RTF from **0.0459** to **0.0379** and improved effective throughput from **21.80x** to **26.40x** real time, while keeping **20/20** correlation passes.
+An uncompressed 16 kHz PCM WAV, mono or stereo at any sample width, is decoded
+in process. Everything else (other sample rates, compressed audio, other
+containers) goes through a single FFmpeg call per request. Resampling stays in
+FFmpeg, which is faster than numpy for all but the shortest clips; see
+[OPTIMIZATION.md](OPTIMIZATION.md#what-did-not-work-and-why).
 
 ## 🌍 Multilingual Support
 
-**Parakeet TDT 0.6B v3** features robust multilingual capabilities with **automatic language detection**. The model can automatically identify and transcribe speech in any of the **25 supported languages** without requiring manual language specification:
+**Parakeet TDT 0.6B v3** transcribes any of its **25 languages** without being told which one it is hearing, with punctuation and capitalization:
 
 English, Spanish, French, Russian, German, Italian, Polish, Ukrainian, Romanian, Dutch, Hungarian, Greek, Swedish, Czech, Bulgarian, Portuguese, Slovak, Croatian, Danish, Finnish, Lithuanian, Slovenian, Latvian, Estonian, Maltese
 
-Simply send audio in any of these languages, and the model will automatically detect and transcribe it with high accuracy, including proper punctuation and capitalization.
+Transcription needs no `language`. [Word timestamps](#word-timestamps) and
+[spoken numbers](#spoken-numbers) do: without it they assume
+`PARAKEET_ALIGN_DEFAULT_LANGUAGE`, English unless you change it.
 
 ## Benchmark
+
+These were measured in 1.x, on the istupakov (fp32, int8) and grikdotnet (fp16)
+`parakeet-v3` exports that 2.0 replaced. For the current export's numbers, see
+[Model Selection](#model-selection).
 
 ### LibriSpeech test-clean (Verified Ground Truth) ⭐
 
@@ -84,8 +89,9 @@ Benchmarked on **LibriSpeech test-clean** dataset with professionally verified h
 > *Whisper Large v3 benchmarks from published literature on LibriSpeech test-clean. Actual results vary by implementation and hardware.
 
 **Key Findings:**
-- All Parakeet precision variants achieve **identical accuracy** (97.84%)
-- INT8 quantization has **zero accuracy loss** vs FP32
+- All three precisions scored the same (97.84%) on these 50 short samples. On
+  longer audio the int8 export dropped words after silences, and it was ~4 WER
+  points worse on Spanish (below)
 - Real-time factor (RTF) of ~0.05 means 20x faster than real-time
 - Competitive with Whisper Large v3 accuracy with significantly faster CPU inference
 
@@ -106,7 +112,7 @@ The metric used is **Speedup Factor** (Audio Duration / Processing Time). Higher
 | faster-whisper | CPU (i7-12700K) | Small | int8 | 7.6x |
 | faster-whisper | CPU (i7-12700K) | Small | fp32 | 4.9x |
 
-*   **Parakeet TDT**: Benchmarked on Intel Core i7-12700K with ONNX Runtime INT8.
+*   **Parakeet TDT**: Benchmarked on the CPUs listed, with ONNX Runtime INT8.
 *   **faster-whisper**: Benchmarks from [official faster-whisper documentation](https://github.com/SYSTRAN/faster-whisper).
 
 ### Detailed Parakeet Performance
@@ -123,11 +129,11 @@ Additional benchmark on real-world YouTube content across multiple languages:
 
 | Language | Model Variant | Latency (s) | Speedup (RTF) | WER | CER |
 | --- | --- | ---: | ---: | ---: | ---: |
-| English | INT8 (`parakeet-tdt-0.6b-v3`) | 70.60 | 20.32x (0.049) | 5.13% | 2.35% |
+| English | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 70.60 | 20.32x (0.049) | 5.13% | 2.35% |
 | English | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 135.43 | 10.59x (0.094) | 5.48% | 2.83% |
 | English | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 112.80 | 12.72x (0.079) | 5.53% | 2.85% |
 | English | Whisper-Large-v3 (DeepInfra) | 53.45 | 26.84x (0.037) | 4.25% | 3.91% |
-| Spanish | INT8 (`parakeet-tdt-0.6b-v3`) | 29.92 | 18.64x (0.054) | 19.45% | 13.79% |
+| Spanish | INT8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 29.92 | 18.64x (0.054) | 19.45% | 13.79% |
 | Spanish | FP16 (`grikdotnet/parakeet-tdt-0.6b-fp16`) | 48.52 | 11.49x (0.087) | 15.31% | 11.33% |
 | Spanish | FP32 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 38.99 | 14.30x (0.070) | 15.31% | 11.33% |
 | Spanish | Whisper-Large-v3 (DeepInfra) | 15.79 | 35.30x (0.028) | 20.70% | 18.05% |
@@ -140,11 +146,11 @@ Additional benchmark on real-world YouTube content across multiple languages:
 *   Or: Python 3.14 and [FFmpeg](https://ffmpeg.org/)
 
 ### CPU Optimization
-ONNX Runtime's CPU execution provider automatically dispatches AVX2/FMA kernels from the standard wheel when the host CPU supports them. The server now detects AVX2 at startup, reports the result in `/health`, and configures ONNX Runtime threading to use the available physical CPU cores while preventing NumPy/BLAS thread pools from competing with inference.
+ONNX Runtime's CPU execution provider dispatches AVX2/FMA kernels from the standard wheel when the host CPU supports them. The server sizes ONNX Runtime's threads to the available physical CPU cores, keeps NumPy/BLAS thread pools from competing with inference, and reports what it chose under `cpu` in `/health`.
 
 For hybrid CPUs (like Intel 12th-14th Gen), performance is still improved by pinning the process to Performance cores (P-cores). You can also override the auto-tuned defaults:
 
-* `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
+* `PARAKEET_ORT_INTRA_THREADS`: ONNX Runtime intra-op worker threads. Defaults to `1` on GPU. With `PARAKEET_USE_GPU=false`, defaults to the lower of detected physical CPUs and available logical CPUs in the container/affinity mask, clamped to the cgroup CPU quota when one is set. Minimum: `1`.
 * `PARAKEET_ORT_INTER_THREADS`: ONNX Runtime inter-op threads. Defaults to `1`, which is best for single-model inference. Minimum: `1`.
 * `PARAKEET_INFER_WORKERS`: concurrent single-item inference calls on CPU (`PARAKEET_BATCHED=0`). Defaults to the available logical CPUs (after the cgroup quota is applied) divided by `PARAKEET_ORT_INTRA_THREADS`, capped at `4`, so workers × intra-op threads fits the CPU budget. Minimum: `1`.
 
@@ -189,6 +195,18 @@ cd stt-api
 pip install -r requirements.txt
 ```
 
+`requirements.txt` installs `onnxruntime-gpu`, which has no macOS build. For a
+CPU-only install, swap it for `onnxruntime` at the same version, as
+`Dockerfile.cpu` does:
+
+```bash
+sed 's/^onnxruntime-gpu\[[a-z,]*\]==/onnxruntime==/' requirements.txt > requirements.cpu.txt
+pip install -r requirements.cpu.txt
+```
+
+On Linux, install the CPU build of PyTorch first (`silero-vad` depends on it),
+or pip pulls the multi-GB CUDA wheels; `Dockerfile.cpu` shows how.
+
 ## Usage
 
 ### Start the Server
@@ -197,7 +215,8 @@ Parakeet TDT provides an OpenAI-compatible API server.
 
 ```bash
 conda activate parakeet-onnx
-python server.py
+python server.py                          # GPU
+PARAKEET_USE_GPU=false python server.py   # CPU
 ```
 *   **Port**: 5092
 *   **Docs**: [http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)
@@ -508,9 +527,11 @@ Word times follow the spoken words.
 
 `POST /v1/audio/transcriptions/batch` takes several `files=` parts in one
 request and returns `{"results": [{"filename", "text", "duration"}, ...],
-"batch_size": N}`. It shares the model form field with the single-file
-endpoint. Requests are bounded by `PARAKEET_MAX_BATCH_FILES` (16) and
-`PARAKEET_MAX_BATCH_BYTES` (512 MiB); see the env knob table in
+"batch_size": N}`. It takes the same `model`, `quantization`,
+`aligner`, `aligner_quantization` and `spoken_numbers` fields as the
+single-file endpoint, but no `language` or `response_format`. Requests are
+bounded by `PARAKEET_MAX_BATCH_FILES` (16) and `PARAKEET_MAX_BATCH_BYTES`
+(512 MiB); see the env knob table in
 [OPTIMIZATION.md](OPTIMIZATION.md#env-knobs) for the per-request limits that
 apply to both endpoints.
 
@@ -532,7 +553,7 @@ To compare models and aligners on your own audio by ear, see
 1.  **Start the Parakeet Server** (if not already running):
     ```bash
     conda activate parakeet-onnx
-    python server.py
+    python server.py   # on CPU: PARAKEET_USE_GPU=false python server.py
     ```
     The server will be available at `http://127.0.0.1:5092`
 
@@ -552,7 +573,7 @@ To compare models and aligners on your own audio by ear, see
 
 ## Model details
 
-When running the application, the ONNX models are downloaded and cached under the `models/` directory (`PARAKEET_MODELS_DIR`). The models served are **Parakeet TDT 0.6B v3** converted to ONNX at FP32, FP16 and INT8, plus the English-only v2 equivalents. The v3 variants cover 25 European languages; which one is used by default is described under [Model Selection](#model-selection).
+Models and aligners are downloaded on first use, or at startup for `PARAKEET_PRELOAD_MODELS`, and cached under `models/` (`PARAKEET_MODELS_DIR`). Which ones exist is set by the [model catalog](#your-own-model-catalog); there is no default model.
 
 ## 🙏 Acknowledgments
 

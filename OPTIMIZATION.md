@@ -54,10 +54,10 @@ python server.py
 
 ## Method
 
-We followed the user requirement to "establish a measured baseline before
-changing code" and "identify bottlenecks with evidence":
+The rule was to establish a measured baseline before changing code, and to
+identify bottlenecks with evidence:
 
-1. **Baseline** (`bench_corpus/baseline.json`): legacy `app.py` running on
+1. **Baseline**: legacy `app.py` running on
    Waitress, default settings, warmed up.
 2. **Profile**: looked at where time was going during a 300 s clip.
    The legacy server spawns `ffmpeg -loglevel … -filter silencedetect` to
@@ -102,7 +102,7 @@ changing code" and "identify bottlenecks with evidence":
   when `PARAKEET_USE_GPU=true`, raises if the live encoder/decoder sessions
   do not actually bind to CUDA/TensorRT first.
 - **GPU micro-batching**: on RTX 3090 the fastest stable profile was FP32
-  model `istupakov/parakeet-tdt-0.6b-v3-onnx` with `PARAKEET_BATCHED=1`,
+  model `istupakov/parakeet-tdt-0.6b-v3-onnx` (the 1.x export) with `PARAKEET_BATCHED=1`,
   `PARAKEET_MAX_BATCH_SIZE=4`, and `PARAKEET_BATCH_WINDOW_MS=4`.
 
 ### What did NOT work (and why)
@@ -139,7 +139,7 @@ changing code" and "identify bottlenecks with evidence":
   16 kHz, and hands everything else to ffmpeg. Measured on a 4-core
   Xeon 2.10 GHz with ffmpeg 6.1.1 and numpy 2.4.6, not the 8-core box
   the RTFx numbers above come from.
-- **INT8 on CUDA**: the default CPU INT8 model is a poor CUDA target. It
+- **INT8 on CUDA**: the 1.x INT8 export (istupakov) is a poor CUDA target. It
   bound to CUDA after preload, but measured only about 8.6× RTFx on the
   300 s file and 8.7× concurrent throughput. Use it on CPU, not GPU.
 - **FP32 pool with 4 workers under sustained concurrent load**: one-shot
@@ -150,25 +150,32 @@ changing code" and "identify bottlenecks with evidence":
 
 ```
 stt-api/
-├── server.py                    # New uvicorn entry point (port 5092)
+├── server.py                    # uvicorn entry point (port 5092)
 ├── pin_pcores.sh                # Optional P-core taskset wrapper
 └── parakeet_service/
-    ├── config.py                # Env knobs, CPU detection
+    ├── config.py                # Env knobs, CPU detection, catalog loading
+    ├── models.yaml              # Model and aligner catalog
     ├── audio.py                 # In-process decode (wave / single ffmpeg)
     ├── chunker.py               # Silero-VAD auto-chunking
     ├── model.py                 # ORT session options, providers, cache
-    ├── batchworker.py           # InferencePool (default) + BatchWorker (GPU)
+    ├── batchworker.py           # InferencePool (CPU) + BatchWorker (GPU)
+    ├── aligner.py               # CTC forced alignment for word timestamps
+    ├── spoken.py                # Spoken-form numbers, money and units
+    ├── number_parse.py          # Number parsing for spoken.py and routes.py
     ├── routes.py                # OpenAI-compatible endpoints
+    ├── compare.html             # The /compare page
     └── main.py                  # FastAPI lifespan
 ```
 
-Key endpoints (unchanged contract):
+Key endpoints:
 
 - `POST /v1/audio/transcriptions` — multipart `file=`, `model=`, optional
   `quantization=fp32|fp16|int8` (default `fp32`),
   `response_format=json|text|srt|vtt|verbose_json`,
-  `timestamp_granularities[]=segment|word`.
+  `timestamp_granularities[]=segment|word`, `language`, `aligner`,
+  `aligner_quantization`, `spoken_numbers`.
 - `POST /v1/audio/transcriptions/batch` — multiple files in one call.
+- `GET /v1/models`, `GET /v1/aligners` — what the catalog serves.
 - `GET /health`, `GET /healthz`.
 - `GET /compare` — a page comparing models and aligners by ear, with `PARAKEET_COMPARE_UI=true`.
 
@@ -184,7 +191,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_MODEL_CATALOG`   | built-in     | YAML file replacing `parakeet_service/models.yaml`; validated at startup |
 | `PARAKEET_PRELOAD_MODELS`  | empty        | comma-separated `model` (fp32) or `model:quantization` entries loaded and warmed up before ready; requests must still name `model=` |
 | `PARAKEET_INFER_WORKERS`   | `min(4, logical CPUs ÷ intra-op threads)` | parallel ORT workers in `InferencePool` when `PARAKEET_BATCHED=0`; logical CPUs are clamped to the cgroup quota |
-| `PARAKEET_BATCHED`         | `1`          | `1` → use GPU-friendly `BatchWorker`; set `0` for CPU      |
+| `PARAKEET_BATCHED`         | `1`, or `0` with `PARAKEET_USE_GPU=false` | `1` → use GPU-friendly `BatchWorker`; `0` → `InferencePool` |
 | `PARAKEET_USE_GPU`         | `true`       | `true` / `auto` / `false`                                |
 | `PARAKEET_GPU_DEVICE_ID`   | `0`          | CUDA device for ORT                                      |
 | `PARAKEET_CHUNK_MIN_SEC`   | `20`         | min chunk length before merge                            |
@@ -192,7 +199,7 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_VAD_THRESHOLD`   | `0.5`        | Silero-VAD speech probability                            |
 | `PARAKEET_VAD_MIN_SILENCE_MS` | `400`     | min silence between chunks                               |
 | `PARAKEET_VAD_SPEECH_PAD_MS` | `120`      | pad around speech segments                               |
-| `PARAKEET_MODEL_CACHE_SIZE` | `0`        | max loaded models kept; least-recent evicted, `0` = unbounded |
+| `PARAKEET_MODEL_CACHE_SIZE` | `0`        | max loaded models kept, and separately max loaded aligners; least-recent evicted, `0` = unbounded |
 | `PARAKEET_MAX_BATCH_SIZE`  | `4`          | max batch (only used when `PARAKEET_BATCHED=1`)          |
 | `PARAKEET_BATCH_WINDOW_MS` | `4`          | batch collection window                                  |
 | `PARAKEET_ORT_INTRA_THREADS` | `1` for GPU, physical cores for CPU override | ORT intra-op threads |
@@ -205,9 +212,12 @@ All optional. Defaults are tuned for an 8-core CPU.
 | `PARAKEET_UVICORN_WORKERS` | `1`          | uvicorn worker processes; each loads its own model copy  |
 | `PARAKEET_FFMPEG_TIMEOUT_SEC` | `180`     | per-request ffmpeg decode timeout                        |
 | `PARAKEET_COMPARE_UI`      | `false`      | serve the `/compare` page (README, word timestamps)      |
+| `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en`  | language assumed for alignment and spoken numbers when a request sends none (README, word timestamps) |
+| `PARAKEET_ALIGN_THREADS`   | `min(4, physical cores)` | CPU threads for the word aligner             |
+| `PARAKEET_SPOKEN_NUMBERS`  | `false`      | spoken numbers for requests that don't send `spoken_numbers` (README, spoken numbers) |
 
 Chunk lengths are per model (`chunk_target_sec` / `chunk_max_sec` in
-`MODEL_CONFIGS`), not configurable: Parakeet v3 chunks at 60/75 s, Whisper and
+`models.yaml`), not environment variables: Parakeet v3 chunks at 60/75 s, Whisper and
 Parakeet v2 at 25/30 s. Whisper's encoder only sees 30 s, and Parakeet v2 drops
 whole stretches of speech from chunks of 45 s or more
 ([#36](https://github.com/scagood/stt-api/issues/36)).
@@ -238,13 +248,11 @@ rather than silent. Set `PARAKEET_ORT_INTRA_THREADS` explicitly to override.
 ## Running
 
 ```bash
-# Conda-isolated install (matches the benchmark env)
-conda create -n parakeet-v3 python=3.11 -y
+# Conda-isolated install (installs onnxruntime-gpu; for CPU-only, see the
+# README's Conda section)
+conda create -n parakeet-v3 python=3.14 -y
 conda activate parakeet-v3
 pip install -r requirements.txt
-
-# Optional CUDA path, installed only in the benchmark env used for GPU tests
-pip install onnxruntime-gpu==1.26.0
 
 # Run
 python server.py
@@ -263,15 +271,11 @@ python server.py
 
 ## Reproducing the benchmark
 
-```bash
-cd bench_corpus
-python bench.py --url http://127.0.0.1:5092/v1/audio/transcriptions \
-                --label mylabel --warmup --out mylabel.json \
-                --sequential-n 3 --concurrency 8 --concurrent-total 16
-```
-
-The bench corpus uses three real audio files (10 s, 60 s, 300 s) and
-measures sequential mean/p50/p95 plus concurrent wall-clock throughput.
+The bench corpus (three real recordings of 10 s, 60 s and 300 s) and its
+`bench.py`, which measured sequential mean/p50/p95 plus concurrent wall-clock
+throughput, were never committed, so these runs can't be reproduced from this
+repo. `benchmark.py` at the root is a separate script that reads MP3s from a
+hard-coded folder.
 
 ## GPU sweep highlights
 
@@ -293,9 +297,5 @@ sequential run per duration.
   service intentionally binds one ORT model to one CUDA device. Running one
   uvicorn process per GPU behind a local load balancer should scale aggregate
   throughput further.
-- **Word-level timestamps**: currently exposed via
-  `timestamp_granularities[]=word` and returned by the underlying
-  `onnx_asr` model — would benefit from an alignment pass for long
-  chunks where boundary words can split.
 - **Streaming endpoint**: the `parakeet-flash` reference project ships
   WebSocket streaming with VAD; adding it here is a natural follow-up.
