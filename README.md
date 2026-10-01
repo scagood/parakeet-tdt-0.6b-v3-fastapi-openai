@@ -421,6 +421,30 @@ quantization under `aligner`.
 | `PARAKEET_ALIGN_DEFAULT_LANGUAGE` | `en` | language assumed when a request sends none, for alignment and spoken numbers: a bare ISO 639-1 code, or empty to use them only when `language` is sent |
 | `PARAKEET_ALIGN_THREADS` | `min(4, physical cores)` | CPU threads for the aligner |
 
+#### Comparing models and aligners by ear
+
+With `PARAKEET_COMPARE_UI=true`, `GET /compare` serves a page for choosing
+between them by listening. Pick an audio file and cut it to a clip (From and
+To, in seconds), then add rows: a model at a quantization, with or without an
+aligner (`parakeet-v2:int8`; `parakeet-v2:int8` + `mms-300m-forced-aligner:int8`;
+...). **Compare** sends the clip through `/v1/audio/transcriptions` once per
+row, one row at a time, and lines up each row's words under the clip's
+waveform. Click a word to hear exactly the span that row gave it; the same word
+is then picked out in every row, close up and in a table of starts and ends.
+The arrow keys step through words and switch rows, Enter replays, and playback
+can be slowed to ½×. A file of exact word times, as synthetic speech has (JSON:
+a verbose_json response or its `words`; or SRT/VTT with one cue per word), adds
+a dashed reference row and each row's average error against it.
+
+The browser decodes the file and sends only the clip, as a 16 kHz WAV, so the
+page and the server hear the same samples. The page is off by default: each
+row is a full transcription, and loads any model or aligner it names, which
+then stays loaded (see `PARAKEET_MODEL_CACHE_SIZE`).
+
+| Variable | Default | |
+|---|---|---|
+| `PARAKEET_COMPARE_UI` | `false` | serve the `/compare` page |
+
 #### Spoken numbers
 
 Parakeet writes numbers its own way, and not consistently: "twenty-five pounds"
@@ -492,8 +516,8 @@ The server exposes Swagger UI for trying requests from the browser, including
 picking a model variant per request.
 Access it at: **[http://127.0.0.1:5092/docs](http://127.0.0.1:5092/docs)**
 
-There is no longer a drag-and-drop upload page: it belonged to the removed
-Flask service and was never served by `server.py`.
+To compare models and aligners on your own audio by ear, see
+[the compare page](#comparing-models-and-aligners-by-ear).
 
 ## 🔌 Open WebUI Integration
 
